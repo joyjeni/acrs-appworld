@@ -125,6 +125,10 @@ def main() -> None:
         "episodesFailed": len(eps) - len(ok),
         "collateralDamageRate": collateral,
         "meanSteps": sum(e["steps"] for e in ok) / max(1, len(ok)),
+        # Diagnostics: why episodes ended, and how often an executed step raised an error.
+        "stopReasons": {r: sum(e.get("stop_reason") == r for e in ok) for r in sorted({e.get("stop_reason", "") for e in ok})},
+        "errorStepRate": sum(e.get("errors", 0) for e in ok) / max(1, sum(e["steps"] for e in ok)),
+        "episodeErrors": sorted({e["error"][:160] for e in eps if "error" in e})[:5],
         "policyDenials": sum(e["policy_denials"] for e in ok),
         "consensus": {k: sum(e["consensus"].get(k, 0) for e in ok) for k in
                       ("consensus_steps", "certified", "abstain_disagree", "abstain_all_failed", "candidate_executions")},
