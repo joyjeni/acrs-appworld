@@ -1,0 +1,169 @@
+\chapter{Introduction}
+\label{ch:introduction}
+
+\begin{chaptersummary}
+This chapter motivates the thesis from what tool-using language-model agents now do: they act inside
+applications on a person's behalf, and they increasingly run on open models that an organisation can
+host itself. It identifies five gaps that remain open when such agents work over many steps, states the
+research problem, the aim, four objectives and six research questions, lists the contributions, and
+outlines the thesis.
+\end{chaptersummary}
+
+\section{Background and Motivation}
+\label{sec:intro-background}
+
+Large language models (LLMs) are no longer used only to generate text. In an \emph{agentic} deployment
+the model decomposes a request into steps, selects application programming interfaces (APIs), calls
+them, reads the results, and decides what to do next \citep{yao2023react,schick2023toolformer}. Public
+catalogues expose tens of thousands of callable endpoints; ToolBench alone indexes 16{,}464 RapidAPI
+endpoints \citep{qin2024toolllm}. Multi-agent frameworks divide the work among several specialised
+agents \citep{wu2024autogen,hong2024metagpt,qian2024chatdev,li2023camel}, and surveys identify their
+coordination as an open systems problem \citep{wang2024survey,guo2024mas}.
+
+The setting has changed in two ways that matter for this thesis. First, agents now \emph{act}: they send
+money, delete files, post messages and change records inside applications, so a wrong step has a cost
+that a wrong sentence does not. AppWorld \citep{trivedi2024appworld} makes this measurable with nine
+everyday applications, 457 APIs and 750 tasks graded by unit tests on the final state of the world,
+including tests that fail when an agent changes something it was not asked to change. Second,
+reliability compounds: a chain of ten steps that are each 95\,\% reliable succeeds only about 60\,\% of
+the time, with no single step looking faulty. On the AppWorld leaderboard (November 2026) the strongest
+systems complete 91--94\,\% of the normal test tasks, but only with frontier models; the best entry that
+uses a model of at most 14 billion parameters reaches 86.9\,\%, and no entry reports cost, collateral
+damage or robustness to manipulated tool output.
+
+Each step of such an agent runs the same four operations: (i) find the APIs relevant to this step, (ii)
+decide which model should write the step, (iii) decide whether the proposed action can be trusted
+before it changes the world, and (iv) decide how much of the growing history to keep. The literature
+studies these operations separately and mostly per step:
+\begin{itemize}[leftmargin=*]
+\item Tool retrievers rank APIs from the current query only, ignoring which applications and calls the
+episode has already committed to \citep{qin2024toolllm,zheng2024toolrerank}.
+\item LLM routers choose a model from the current query and a cost budget, without regard for how risky
+the episode has become \citep{ong2025routellm,panda2025pilot,yue2025masrouter}.
+\item Consensus methods count votes over generated text, so several samples that agree on the same
+mistake out-vote a correct one \citep{wang2023selfconsistency,du2024debate}; no method certifies an
+\emph{action} before it executes.
+\item Prompt compressors shrink context to a ratio fixed in advance, with no guarantee that the facts the
+next step needs survive \citep{jiang2023llmlingua,li2023selectivecontext}.
+\end{itemize}
+
+The motivation of this research is that the signals each operation needs already exist inside the
+episode: the applications the agent has used, the state changes candidate actions would cause, the
+episode's running error rate, and the facts that earlier steps established. A system that carries
+these signals across steps, and protects each with an explicit guarantee or an abstention rule, should
+be more reliable and cheaper than four independently optimised stages, and should make that
+reliability achievable with open models on modest hardware.
+
+The same agent design addresses a public problem in India. Kisan Call Centres answered 33.53 lakh
+farmer calls in 2022--23, and the Ministry of Agriculture and Farmers Welfare has announced chatbot and
+AI-based decision support for them \citep{loksabha2023kcc}; Kisan e-Mitra already answers about 13{,}000
+scheme queries a day \citep{wadhwani2024kisanemitra}. A deployable advisory agent must ground answers in
+government data, leave an audit trail, and know which answers (a pesticide dose, an entitlement) it may
+recommend but not decide.
+
+\section{Problem Statement}
+\label{sec:intro-problem}
+
+Given an episode of steps over a large API catalogue and a choice of open models of different sizes,
+current agents (a) retrieve APIs without episode memory, (b) choose models without regard to risk or
+cost, (c) execute state-changing actions without verifying them and without any bound on how often they
+are wrong, and (d) truncate history with no fidelity guarantee. The research problem is to design a
+closed-loop agent architecture in which state produced at step $t$ improves retrieval, routing,
+verification and context management at step $t+1$; to give the decision to act a certified error bound
+and an explicit authority model; and to show, by controlled, leak-free experiments on simulated agents,
+on a public-problem dataset and on real open-weight agents, which part of the loop contributes what.
+
+\section{Research Aim and Objectives}
+\label{sec:intro-objectives}
+
+\textbf{Aim.} To design, implement and evaluate the Adaptive Context Reasoning System (ACRS), a
+closed-loop architecture for tool-using LLM agents in which session-aware retrieval, risk-weighted
+routing, certified consensus and fidelity-controlled pruning share one episode state, so that open
+models on free or low-cost GPUs act reliably, cheaply and within stated error bounds.
+
+\textbf{Objectives.}
+\begin{enumerate}[label=\textbf{O\arabic*}, leftmargin=*]
+\item \textbf{SATR -- Session-Adaptive Tool Scoring.} To design a training-free retriever that scores
+APIs by their utility to the current step given what the episode has already used, so a small model
+sees the right documentation within a fixed context budget (Chapter~\ref{ch:satr}).
+\item \textbf{APRR -- Risk-Weighted Policy Routing.} To design a contextual-bandit router that assigns
+each step to a small or a large model, whose exploration changes sign with the episode's risk, with an
+escalation policy and a regret guarantee (Chapter~\ref{ch:aprr}).
+\item \textbf{MNCD -- Byzantine-Tolerant Consensus and Certified Execution.} To design a consensus
+mechanism that certifies an answer or a state-changing action only when independent candidates agree on
+grounded evidence or on the state change they cause, abstains otherwise, tolerates up to $f$ faulty
+participants, and sets its certification threshold with a finite-sample error guarantee, under an
+explicit policy-as-code authority model (Chapters~\ref{ch:mncd} and~\ref{ch:governance}).
+\item \textbf{FCNP -- PID-Controlled Provenance Pruning.} To design a context governor whose
+proportional--integral controller removes as much history as a fidelity floor allows while never
+evicting the facts and schemas a committed call needs (Chapter~\ref{ch:fcnp}).
+\end{enumerate}
+
+\section{Research Questions}
+\label{sec:intro-rq}
+
+\begin{description}[leftmargin=1.3cm, style=nextline]
+\item[RQ1] Does episode state improve API retrieval over stateless retrieval once training-label leakage
+is removed, and where does it stop helping?
+\item[RQ2] Does risk-weighted routing lower cost and regret without raising errors?
+\item[RQ3] Does consensus over grounded evidence or over executed outcomes prevent wrong and damaging
+actions, including under prompt injection and collusion, and can its error rate be certified?
+\item[RQ4] Does controlled pruning keep the facts an agent needs at a lower token cost than fixed-ratio
+and recency baselines?
+\item[RQ5] Does the closed loop outperform the four mechanisms deployed separately, on simulated agents,
+on real farmer queries, and on real open-weight agents?
+\item[RQ6] How close can open models on free or low-cost GPUs come to frontier-model agents when the loop
+is in place, and at what cost and collateral damage?
+\end{description}
+
+\section{Contributions of the Thesis}
+\label{sec:intro-contrib}
+
+\begin{enumerate}[label=\textbf{C\arabic*}, leftmargin=*]
+\item \textbf{A leakage audit and leak-free protocol} for session-level tool retrieval on ToolBench G1:
+94 of the 100 test gold tool sets appear verbatim in the training trajectories, inflating NDCG@5 from
+0.485 to 0.576 (Chapter~\ref{ch:methodology}).
+\item \textbf{SATR}, a training-free session-aware retriever: +12.4\,\% held-out NDCG@5 over BM25 on
+ToolBench (95\,\% CI of the difference +0.036 to +0.094), with a measured scope limit on topic-switching
+queues (Chapters~\ref{ch:satr} and~\ref{ch:governance}).
+\item \textbf{APRR}, a risk-signed contextual-bandit router with escalation and a regret bound on
+optimistic rounds; lowest regret of six routers on ToolBench (Chapter~\ref{ch:aprr}).
+\item \textbf{MNCD with certified execution}: an evidence-weighted Byzantine quorum (accepted errors
+24.0\,\% to 0.6\,\% on ToolBench), extended to outcome-level consensus over executed candidate
+programs, a Learn-then-Test certification threshold \citep{angelopoulos2025ltt}, and a policy-as-code
+authority stage that is deny-by-default, tested both ways and audited in a hash chain
+(Chapters~\ref{ch:mncd} and~\ref{ch:governance}).
+\item \textbf{FCNP}, a typed-block pruner with a PI fidelity controller: fidelity floor met on 99.7\,\% of
+turns while removing 47\,\% of tokens (Chapter~\ref{ch:fcnp}).
+\item \textbf{KCC-Sessions}, a public-problem benchmark built from real Kisan Call Centre queries without
+inventing labels, on which the integrated loop cuts executed errors from 11.3\,\% to 0.51\,\% and the
+success of injection attacks from 27.8\,\% to 0.86\,\% (Chapter~\ref{ch:governance}).
+\item \textbf{ACRS on AppWorld}: the four objectives specialised to an interactive environment with real
+open-weight agents, evaluated with the official scorer, collateral-damage tests and paired significance
+tests, together with an open, reproducible harness for free and low-cost GPUs
+(Chapter~\ref{ch:appworld}).
+\end{enumerate}
+
+Figure~\ref{fig:contrib-map} maps each research gap to the objective that addresses it, the contribution
+it produces and the chapter that holds the evidence.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/01_contributions}
+\caption{Research gaps, objectives, contributions and evidence}
+\label{fig:contrib-map}
+\end{figure}
+
+\section{Organisation of the Thesis}
+\label{sec:intro-organisation}
+
+Chapter~\ref{ch:literature} reviews tool learning, LLM routing, multi-agent consensus, context
+compression and agent safety, and derives the research gaps. Chapter~\ref{ch:methodology} describes the
+design method, the ACRS loop, the three evaluation layers (ToolBench, KCC-Sessions and AppWorld), the
+metrics and the statistical analysis. Chapters~\ref{ch:satr} to~\ref{ch:fcnp} present the four
+objectives, each with its formulation, algorithm, formal properties, experiments and its specialisation
+to AppWorld. Chapter~\ref{ch:integrated} evaluates the closed loop on ToolBench and a live AGMARKNET
+case. Chapter~\ref{ch:governance} introduces authority-bounded execution and the Kisan Call Centre
+evaluation. Chapter~\ref{ch:appworld} evaluates ACRS with real open-weight agents on AppWorld.
+Chapter~\ref{ch:conclusion} answers the research questions, states the limitations and outlines future
+work.

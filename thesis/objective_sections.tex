@@ -1,0 +1,52 @@
+%%%%% O1 -> ch4_satr.tex (inserted before \section{Summary})
+\section{Specialisation to AppWorld}
+\label{sec:satr-appworld}
+
+On AppWorld the session is one task episode, and the catalogue is the 457 APIs of the nine applications.
+SATR ranks API documentation before every step by BM25 over the instruction and the last two code
+blocks, plus a decayed memory of the applications already used (the AppWorld counterpart of the provider
+signal $\mathbf{f}_t$), and it completes authentication by adding an application's login API as soon as
+that application enters the episode. Committed APIs stay visible. Only the selected documentation enters
+the prompt, so the measure of success is whether a small model completes the task within a fixed context
+budget. The evaluation is in Chapter~\ref{ch:appworld}; the ToolBench and KCC results above bound the
+scope of the claim, because session signals help in genuinely multi-step episodes and act as noise in
+queues that switch topic at every step.
+
+%%%%% O2 -> ch5_aprr.tex
+\section{Specialisation to AppWorld}
+\label{sec:aprr-appworld}
+
+On AppWorld the arms are model tiers rather than agents: a small open model (1.7B--4B parameters) and a
+large one (8B--32B), both served on the same GPU. The context records whether the previous step failed,
+whether the step is likely to change state, and whether the episode is long, and a Thompson sampler with
+a cost penalty on the large tier and a risk margin on the small tier chooses the tier for each step. The
+risk margin is the AppWorld form of the risk-signed exploration term: on risky steps the small model must
+beat the large one by more than the cost saving before it is trusted. Cost is measured in real tokens;
+the evaluation is in Chapter~\ref{ch:appworld}.
+
+%%%%% O3 -> ch6_mncd.tex
+\section{Specialisation to AppWorld: Consensus on Outcomes}
+\label{sec:mncd-appworld}
+
+When agents act, the object of consensus is not a textual claim but the change an action makes to the
+world. On AppWorld, MNCD samples candidate programs for any step that contains a state-changing call,
+executes each from a saved world state, records the state-changing calls each one made and whether it
+raised an error, restores the state, and certifies the outcome on which a weighted quorum agrees. This
+follows the ARC-style practice of generating many programs and keeping the output that independent
+programs agree on \citep{chollet2019measure}. The Byzantine reading carries over: a candidate that
+raises an error carries no weight, and an outcome is certified only with at least $\min(q,n)$ clean
+supporters and a weighted share of at least $\theta$; otherwise MNCD abstains and the router escalates.
+The certification threshold and the policy-as-code stage are developed in Chapter~\ref{ch:governance};
+the evaluation is in Chapter~\ref{ch:appworld}.
+
+%%%%% O4 -> ch7_fcnp.tex
+\section{Specialisation to AppWorld}
+\label{sec:fcnp-appworld}
+
+AppWorld episodes run for 30--60 steps, and their outputs (paginated lists, documentation, error
+traces) overflow a small model's context. FCNP's typed blocks become the task, recent steps, and older
+steps, and its hard-keep set becomes every output line carrying an access token, an identifier or an
+error. Older outputs are compressed head-and-tail around those lines, and the PI controller adjusts the
+compression length so that the share of critical lines retained stays above the fidelity floor (0.9)
+while the history stays within its token budget. The analogue is recency truncation; the evaluation is
+in Chapter~\ref{ch:appworld}.

@@ -1,0 +1,259 @@
+\chapter{Research Methodology}
+\label{ch:methodology}
+
+\begin{chaptersummary}
+This chapter sets out the design method that decides where a model belongs in the agent and what it may
+decide, defines the ACRS closed loop and the episode state shared by the four objectives, and describes
+three evaluation layers: sessionised ToolBench with simulated agents for controlled, comparable
+measurement; KCC-Sessions, built from real farmer queries, for the public problem; and AppWorld with
+real open-weight agents for external validity. It then gives the leakage audit, the protocol, the
+metrics and the statistical analysis, including the sample sizes each claim needs.
+\end{chaptersummary}
+
+\section{Design Method}
+\label{sec:method-design}
+
+Every component of ACRS was designed by the same four-phase method. \emph{Understand} traces a symptom,
+such as a low score or a high cost, back to its root cause. \emph{Define} states the target outcome
+independently of the metric one is asked to move: for ACRS, \emph{every auto-executed action is
+grounded, affordable and within a certified error bound, and everything else reaches a named person with
+its evidence attached}. \emph{Decompose} asks of every step, in a fixed order, whether it involves
+judgment at all (if not, it is plain code), whether its steps are knowable in advance (a workflow) or
+whether a model must choose what happens next (an agent, which then needs a termination rule); and then,
+separately, what the model may decide once it is there. \emph{Sequence and validate} stages deployment
+so that each stage produces the evidence for the next: shadow mode, then live with approval, then a
+separately reviewed path for any change of scope. The resulting stage registry, with each stage's
+pattern, authority and failure detector, is given in Chapter~\ref{ch:governance}.
+
+\section{The ACRS Closed Loop}
+\label{sec:method-loop}
+
+ACRS processes each step through four stages in a fixed order and writes the result back into a state
+that the next step reads (Figure~\ref{fig:acrs-loop}):
+\begin{equation}
+q_t,\ M_{t-1} \;\xrightarrow{\ \text{SATR}\ }\; \mathcal{T}_t
+\;\xrightarrow{\ \text{APRR}\ }\; a_t
+\;\xrightarrow{\ \text{MNCD}\ }\; \mathcal{C}_t
+\;\xrightarrow{\ \text{FCNP}\ }\; (\hat{y}_t,\ M_t),
+\label{eq:acrs-loop}
+\end{equation}
+where $q_t$ is the request or sub-goal at step $t$, $\mathcal{T}_t$ the ranked tool shortlist, $a_t$ the
+agent or model tier chosen, $\mathcal{C}_t$ the consensus certificate, and $\hat{y}_t$ the answer or
+action (Figure~\ref{fig:turn-loop}). A governance stage G1 converts $\mathcal{C}_t$ into a disposition
+(execute, review or block) by a deny-by-default policy check. Integration is not a fifth algorithm: it
+is the contract that every stage reads from and writes to the same state.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/02_system_architecture}
+\caption{ACRS system architecture: the four objectives share the episode state $M_t$ and draw tools from
+the active environment (ToolBench, Indian OGD services or AppWorld applications)}
+\label{fig:acrs-loop}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/03_turn_loop}
+\caption{One step of the ACRS closed loop, from the request to the write-back of $M_t$}
+\label{fig:turn-loop}
+\end{figure}
+
+\subsection{Session state}
+\label{sec:method-state}
+
+\begin{definition}[Session state]
+\label{def:state}
+The state after step $t$ is the tuple
+\[
+M_t = \big(\mathbf{m}_t,\ \mathbf{s}_t,\ \mathbf{f}_t,\ U_t,\ F_t,\ \rho_t,\ K_t\big),
+\]
+where $\mathbf{m}_t$ is an exponentially decayed term vector of intents (decay $0.72$ per step),
+$\mathbf{s}_t$ the term vector of intents already served (decay $0.9$), $\mathbf{f}_t$ the decayed counts
+of providers or applications whose APIs were committed (decay $0.8$), $U_t$ and $F_t$ the per-tool usage
+and failure counts, $\rho_t \in [0,1]$ the running risk, and $K_t$ the context blocks retained by FCNP.
+\end{definition}
+
+Risk rises by $0.18$ on every tool failure and falls by $0.08$ on every success, clipped to $[0,1]$. SATR
+reads $\mathbf{m}_t$, $\mathbf{s}_t$, $\mathbf{f}_t$, $U_t$ and $F_t$; APRR reads $\rho_t$ and the remaining
+budget; MNCD writes successes, failures and evidence; FCNP writes $K_t$.
+
+\section{Datasets and Evaluation Layers}
+\label{sec:method-data}
+
+No single benchmark tests all four objectives with real agents, a public problem and comparability with
+prior work, so ACRS is evaluated in three layers (Table~\ref{tab:layers}).
+
+\begin{table}[htbp]
+\centering
+\caption{The three evaluation layers}
+\label{tab:layers}
+\footnotesize
+\begin{tabular}{@{}p{0.17\textwidth}p{0.22\textwidth}p{0.2\textwidth}p{0.33\textwidth}@{}}
+\toprule
+Layer & Data & Agents & Purpose \\
+\midrule
+ToolBench-Sessions & 100 sessions, 174 sub-goals, 10{,}439 APIs & simulated, seeded & controlled ablations, comparability with tool-retrieval literature, adversarial tests \\
+KCC-Sessions & real Kisan Call Centre queries; 11 advisory services + ToolBench distractors & simulated, seeded & the public problem; risk classes (informational, dose, entitlement) \\
+AppWorld & 9 apps, 457 APIs, 750 tasks with state-based unit tests & real open-weight LLMs (Qwen3, 1.7B--32B) & external validity, cost, collateral damage, leaderboard comparison \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sessionised ToolBench G1}
+The ToolBench G1 retrieval split \citep{qin2024toolllm} has 10{,}439 API endpoints. The 100 test queries
+are split into 174 sub-goals, each with its gold endpoint set, and grouped into 100 sessions of one to
+four turns. Training trajectories (82{,}599) are used only to fit SATR v1's co-occurrence graph; SATR v2
+uses no training data.
+
+\subsection{KCC-Sessions}
+Kisan Call Centre transcripts \citep{kccchakshu} hold real farmer queries with expert answers. They become
+an ACRS benchmark without inventing labels: the KCC \texttt{QueryType} is mapped once to the advisory
+service that answers it (O1 gold); the queries of one block on one day for one crop form a
+pseudo-session; \texttt{QueryType} also fixes a risk class (agronomic-dose and entitlement queries are
+recommend-only); and the 10{,}439 ToolBench endpoints are added to the corpus as distractors
+(Chapter~\ref{ch:governance}).
+
+\subsection{AppWorld}
+AppWorld \citep{trivedi2024appworld} provides nine everyday applications operated through 457 APIs and
+750 tasks in four splits (\texttt{train}, \texttt{dev}, \texttt{test\_normal} with 168 tasks and
+\texttt{test\_challenge} with 417). Each task is graded by unit tests on the final state of the world.
+API documentation carries each endpoint's HTTP method, so the side effect of every call is known
+exactly. Agents are real open-weight models from the Qwen3 family \citep{yang2025qwen3}, served with vLLM
+\citep{kwon2023vllm} on a single free or low-cost GPU; the largest model that fits is used as the large
+tier and a 1.7B--4B model as the small tier (Chapter~\ref{ch:appworld}).
+
+\subsection{Indian Open Government Data}
+Live execution uses Indian OGD on \texttt{data.gov.in} under the Government Open Data Licence -- India,
+including the AGMARKNET daily market-price resource
+(\url{9ef84268-d588-465a-a308-a864a43d0070}). Prices are never generated: a failed live call fails loudly
+and the turn abstains.
+
+\subsection{Simulated agent pool}
+For the ToolBench and KCC layers, agent execution is simulated with a seeded, schema-faithful runtime so
+that orchestration mechanisms are measured apart from the quality of any particular LLM. Each agent has a
+tier, a cost per call, a latency and a hallucination rate (Table~\ref{tab:agents}). In the adversarial
+experiments a hallucinating agent also forges citations and colludes, and poisoned endpoints inject
+instructions into tool output.
+
+\begin{table}[htbp]
+\centering
+\caption{Simulated agent pool (ToolBench and KCC layers)}
+\label{tab:agents}
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Agent & Tier & Cost / call & Latency (ms) & Hallucination rate \\
+\midrule
+Light lookup & light & 0.0004 & 180 & 0.10 \\
+Agriculture specialist & standard & 0.0021 & 420 & 0.04 \\
+Geo specialist & standard & 0.0018 & 380 & 0.05 \\
+Heavy reasoner & heavy & 0.0135 & 1{,}750 & 0.02 \\
+Verifier & verifier & 0.0026 & 310 & 0.01 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Leakage Audit}
+\label{sec:method-leakage}
+
+Before any comparison, every ToolBench test gold tool set was checked against the training trajectories.
+\textbf{94 of the 100 test gold sets appear verbatim in the training data.} A co-occurrence graph fitted
+on all trajectories therefore encodes the test answers: with it, SATR v1 reaches NDCG@5 of 0.576; with
+the leaking trajectories removed (5{,}476 trajectories, leaving 77{,}123) it falls to 0.485, below the
+BM25 baseline of 0.517 (Table~\ref{tab:leakage}). All results use the leak-filtered graph, and the SATR
+v2 signals use no training data. On AppWorld the same discipline is enforced by its split rules: prompts
+and parameters are tuned on \texttt{train} and \texttt{dev} only, and the test splits are run once per
+final configuration without inspecting their tasks.
+
+\begin{table}[htbp]
+\centering
+\caption{Effect of training-label leakage on SATR v1 (174 sub-goals)}
+\label{tab:leakage}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Configuration & NDCG@5 & NDCG@10 & Recall@10 \\
+\midrule
+BM25 (stateless) & 0.517 & 0.554 & 0.644 \\
+SATR v1, graph fitted on all training data (leaky) & 0.576 & 0.596 & 0.654 \\
+SATR v1, leak-filtered graph & 0.485 & 0.522 & 0.592 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Evaluation Protocol and Metrics}
+\label{sec:method-protocol}
+
+Figure~\ref{fig:method-flow} summarises the evaluation workflow.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/08_methodology}
+\caption{Evaluation workflow: from the benchmark through the leakage audit to the statistical claims}
+\label{fig:method-flow}
+\end{figure}
+
+\textbf{Ablation.} Each objective has a switch whose off state is its state-of-the-art analogue: O1
+stateless retrieval (BM25 on ToolBench and KCC; static retrieval from the instruction on AppWorld); O2
+static routing to the heavy tier; O3 majority vote on ToolBench and KCC and single greedy execution on
+AppWorld; O4 a fixed 50\,\% keep ratio or recency truncation. The \emph{SOTA baseline} uses all
+analogues; each \emph{+O$k$} configuration swaps in one ACRS mechanism; \emph{Full ACRS} uses all four;
+on AppWorld, leave-one-out ablations remove one objective at a time from the full system. On AppWorld the
+\emph{baseline} is a ReAct-style code agent that discovers APIs through the documentation app, as in the
+benchmark's reference agents.
+
+\textbf{No gold feedback.} SATR commits the system's own picks to the state, never gold tools.
+
+\textbf{Metrics.}
+\begin{itemize}[leftmargin=*]
+\item Retrieval: NDCG@5 (primary), NDCG@10, Recall@10 and MRR \citep{jarvelin2002cumulated}.
+\item Safety: \emph{executed-error rate} (share of sub-goals on which a wrong answer or action was
+executed), executed precision, abstention or review rate, \emph{attack success rate} under injection,
+and on AppWorld the \emph{collateral-damage rate}, the share of tasks failing a test that passes when the
+agent does nothing.
+\item Task success on AppWorld: the official task goal completion (TGC) and scenario goal completion (SGC).
+\item Efficiency: tokens and cost, wall-clock latency, router mix and regret.
+\item Context: share of tokens removed, fidelity $\Phi$, and the share of steps meeting the floor.
+\item Certification: Learn-then-Test threshold, held-out risk against $\alpha$, coverage, and ECE.
+\end{itemize}
+
+\section{Statistical Analysis and Sample Size}
+\label{sec:method-stats}
+
+On ToolBench and KCC the unit of analysis is the session; each headline comparison is tested with a
+paired bootstrap 95\,\% confidence interval \citep{efron1993bootstrap} and a Wilcoxon signed-rank test
+\citep{wilcoxon1945individual}, and proportions use Wilson intervals \citep{wilson1927probable}. On
+AppWorld the unit is the task: configurations run on the same backbone model are compared by McNemar's
+exact test on per-task success \citep{mcnemar1947note} and by a paired bootstrap interval on the
+difference in TGC; final configurations are run with at least three seeds and reported with pass$^k$.
+One comparison per objective is declared primary; all others are exploratory.
+
+\textbf{Is the sample large enough?} For O1 on ToolBench the per-session NDCG@5 difference between SATR
+v2 and BM25 has $d_z = 0.436$; with 100 sessions the achieved power at $\alpha = 0.05$ is 0.99, and the
+minimum detectable effect at 80\,\% power is 0.044 NDCG@5. For O3 the change in accepted errors from
+24.0\,\% to 0.6\,\% has Cohen's $h = 0.87$ \citep{cohen1988power}. For certified execution, a threshold
+can be certified at risk $\alpha$ and level $\delta$ only if $n \ge \lceil\log\delta/\log(1-\alpha)\rceil$
+executions are available: 149 for $\alpha = 0.02$ and 59 for $\alpha = 0.05$ at $\delta = 0.05$. A
+calibration half of ToolBench has about 87, which is why the stronger claims are made on the larger KCC
+and AppWorld layers. On AppWorld, a pilot on \texttt{dev} estimates the discordant-pair rate between
+configurations before test runs are spent, so that McNemar's test has adequate power.
+
+\section{Threats to Validity}
+\label{sec:method-threats}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Simulated agents} in the ToolBench and KCC layers measure mechanisms, not LLM quality; the
+AppWorld layer uses real open-weight agents.
+\item \textbf{Pseudo-sessions and label noise} in KCC-Sessions; KCC services other than the
+data.gov.in resources are simulated.
+\item \textbf{Exploration on AppWorld}: outcome-level consensus executes candidate programs from a saved
+world state and restores it; these executions are disclosed and counted, and a real deployment needs an
+equivalent sandbox or an approval step.
+\item \textbf{Model scale}: free and low-cost GPUs limit the backbone to at most about 32B parameters,
+so absolute AppWorld scores are compared with entries of similar model size, and frontier entries are
+cited as context.
+\item \textbf{Hand-set parameters} for O2--O4, examined in sensitivity sweeps and, for the certification
+threshold, replaced by Learn-then-Test.
+\end{itemize}
+
+All code, splits and aggregate results are public at \url{https://github.com/joyjeni/phd-agentic-ai-master}
+and \url{https://github.com/joyjeni/acrs-appworld}; AppWorld content is never redistributed unencrypted,
+as its licence requires.

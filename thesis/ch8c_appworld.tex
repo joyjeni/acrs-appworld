@@ -1,0 +1,99 @@
+\chapter{ACRS with Open-Weight Agents on AppWorld}
+\label{ch:appworld}
+
+\begin{chaptersummary}
+This chapter tests ACRS where it matters most: with real open-weight language models acting inside
+applications whose state they change. Each objective is specialised to AppWorld's nine applications and
+457 APIs, the system is run on a single free or low-cost GPU, and it is scored by the benchmark's own
+unit tests, by collateral-damage tests, and by paired significance tests against a reference agent on
+the same model.
+\end{chaptersummary}
+
+\section{Why AppWorld}
+\label{sec:aw-why}
+
+The ToolBench and KCC layers measure the orchestration mechanisms with simulated agents. AppWorld
+\citep{trivedi2024appworld} removes that limitation. Its tasks require long sequences of API calls across
+applications such as a payment app, a music app, a file system and e-mail; agents write Python that
+calls the APIs; and each task is graded by unit tests on the final state. Some of those tests pass when
+the agent does nothing and fail when it changes something it was not asked to change, which turns
+collateral damage into a measured quantity. The benchmark therefore tests all four objectives at once:
+API retrieval from a large catalogue inside a long episode (O1), the choice of model per step (O2),
+whether a state-changing action can be trusted before it executes (O3), and how much of a 30--60-step
+history to keep (O4).
+
+\section{Specialisation of the Objectives}
+\label{sec:aw-spec}
+
+\paragraph{Side effects.} AppWorld's API documentation records each endpoint's HTTP method. A call is
+read-only if its method is GET and state-changing otherwise; this classification is exact, so O3 spends
+its effort only on steps that change the world, and the policy stage can single out deletions.
+
+\paragraph{O1.} Before each step the retriever ranks API documentation by BM25 over the instruction and
+the last two code blocks, boosted by a decayed memory of the applications the episode has used. When an
+application enters the episode its login API is added automatically, because protected calls need that
+application's access token. APIs the episode has committed to stay visible. Only the selected
+documentation (ten APIs by default) enters the prompt, so a small model works within a fixed context
+budget. The analogue retrieves once from the instruction and never updates.
+
+\paragraph{O2.} A two-arm contextual Thompson sampler chooses the small or the large model for each step.
+The context records whether the last step failed, whether the step is likely to change state and whether
+the episode is long. The small model is penalised on risky contexts until it has proved itself there,
+which is the risk-signed term, and the large model carries a cost penalty. The reward is an error-free,
+policy-allowed step. The analogue always uses the large model.
+
+\paragraph{O3.} When a proposed code block contains a state-changing call, ACRS samples further
+candidate programs, saves the world state, executes every candidate from that state, records the
+state-changing calls each made and whether it raised an error, and restores the state after each. This is
+the strategy that strong ARC solvers use for abstract reasoning: generate several programs, run them, and
+keep the result that independent programs agree on \citep{chollet2019measure}. A candidate's vote
+weight is one if it executed cleanly; the outcome signature with the largest weighted share is
+certified if the share reaches $\theta$ with at least two supporters, and only then is it executed for
+real. Otherwise MNCD abstains: nothing is executed, the agent is told that the candidates disagreed, and
+the router escalates. The analogue executes the single greedy proposal.
+
+\paragraph{G1.} Before anything executes, a policy check denies deletions the instruction does not ask
+for and writes to applications outside the task's scope, and tells the agent why. It is the AppWorld
+form of approve-before-execute.
+
+\paragraph{O4.} The history governor keeps the task, the last three steps and every output line that
+carries an access token, an identifier or an error, and compresses the rest head-and-tail. A PI loop
+adjusts the compression length so that the share of such critical lines retained stays above 0.9 while
+the history stays under its token budget. The analogue keeps only the most recent steps.
+
+\section{Experimental Setup}
+\label{sec:aw-setup}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Models.} Qwen3 open-weight models \citep{yang2025qwen3} served with vLLM
+\citep{kwon2023vllm}, chosen by GPU memory: a 32B (A100), 14B (L4) or 8B (T4) model in 4-bit AWQ as the
+large tier, and a 1.7B or 4B model as the small tier. Thinking mode is disabled.
+\item \textbf{Configurations.} A ReAct-style reference agent on the same models, full ACRS, and
+leave-one-out ablations without O1, O2, O3, O4 or G1.
+\item \textbf{Protocol.} Development and ablations on \texttt{dev}; final configurations once on
+\texttt{test\_normal} and \texttt{test\_challenge} with three seeds; no inspection of test tasks.
+\item \textbf{Budget.} At most 40 steps per task and a token ceiling per task; candidate executions in O3
+count toward AppWorld's interaction limit and are reported.
+\item \textbf{Metrics.} Official TGC and SGC, collateral-damage rate, tokens, router mix, consensus
+certifications and abstentions, policy denials, and mean history fidelity; McNemar's exact test and a
+paired bootstrap interval on per-task success.
+\end{itemize}
+
+\section{Results}
+\label{sec:aw-results}
+
+% AppWorld results are inserted from experiments/results/appworld/*.summary.json once the GPU runs finish.
+% No AppWorld number is reported anywhere in this thesis before then.
+\textit{The development-split pilot and ablations are running on the free and Colab GPUs described above;
+this section reports their outcomes, and the test-split results, from the run summaries once they are
+complete.}
+
+\section{Position Relative to the Leaderboard}
+\label{sec:aw-leaderboard}
+
+The strongest AppWorld entries (November 2026) complete 91--94\,\% of \texttt{test\_normal} tasks with
+frontier models, and the best entry using a model of at most 14B parameters reaches 86.9\,\%. ACRS on a
+free or low-cost GPU is compared primarily with the reference agent on the \emph{same} model, which
+isolates the contribution of the architecture, and secondarily with leaderboard entries of similar model
+size. Frontier entries are cited as an upper reference, not as the claim. ACRS also reports cost,
+collateral damage and certified error, which no current entry reports.

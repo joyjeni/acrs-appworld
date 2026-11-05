@@ -1,0 +1,371 @@
+\chapter{Authority-Bounded Execution and the Kisan Call Centre Evaluation}
+\label{ch:governance}
+
+\begin{chaptersummary}
+Chapters~\ref{ch:integrated} and earlier answer \emph{what the best answer is and how cheaply it can
+be obtained}. This chapter answers a different question: \emph{when is the system allowed to act on
+that answer without a person?} It introduces G1, a governance stage that binds the four objectives
+into one authority contract: a deny-by-default policy-as-code engine outside the agents, a
+tool-boundary guard against indirect prompt injection, and a certification threshold chosen by
+Learn-then-Test, so that the error rate of auto-executed answers carries a finite-sample guarantee.
+The chapter then moves the integrated O1--O4\,+\,G1 loop onto a public problem, farmer advisory at
+India's Kisan Call Centres, using real farmer queries and expert answers.
+\end{chaptersummary}
+
+\section{From the Best Answer to the Permission to Act}
+\label{sec:gov-motivation}
+
+A multi-agent tool pipeline is a chain, and a chain is only as reliable as the product of its stages.
+For $m$ stages with reliabilities $r_1,\dots,r_m$,
+\begin{equation}
+  R_{\text{end-to-end}} \;=\; \prod_{i=1}^{m} r_i ,
+  \label{eq:gov-compound}
+\end{equation}
+so ten stages at $0.95$ give about $0.60$, with no single stage looking faulty. The objectives O1--O4
+raise individual $r_i$. They do not decide which answers may be \emph{acted on}. Capability and
+authority are independent properties: a component can be capable of producing an answer and still
+not be permitted to commit it. ``Human in the loop'' does not settle the question. It resolves into
+one of four oversight designs, chosen per decision:
+\emph{approve before execute} (irreversible steps),
+\emph{review after execute} (cheap reversal),
+\emph{sample audit} (measured error cost sets the rate), and
+\emph{escalate on uncertainty}, which is valid only when confidence is calibrated.
+
+\section{Design Method}
+\label{sec:gov-method}
+
+ACRS follows a four-phase design method:
+\begin{enumerate}
+  \item \textbf{Understand}: trace the symptom to its root cause;
+  \item \textbf{Define}: state the target outcome independently of the metric one is asked to move;
+  \item \textbf{Decompose}: for every step, ask whether it involves judgment at all, whether its steps
+        are knowable in advance (a workflow), or whether a model must choose what happens next (an
+        agent, which then needs a termination rule);
+  \item \textbf{Sequence and validate}: shadow, then live with approval, then a separately reviewed path for
+        scope changes.
+\end{enumerate}
+The target outcome for ACRS is:
+\emph{every auto-executed answer is grounded, affordable, and within a certified error bound;
+everything else reaches a named person with its evidence attached}.
+Table~\ref{tab:gov-stages} gives the decomposition. It is stored as data
+(\texttt{paim.governance.authority}) and its invariants are unit-tested: no model-based stage decides
+outright, every model-based stage names a failure mode and a detector, the approval gate is not a
+model, and all five component types (ingestion, rules, model-assisted recommendation, approval gate,
+write-back) are present.
+
+\begin{table}[htbp]
+  \centering
+  \caption{ACRS stage registry: pattern, authority and failure detection per stage}
+  \label{tab:gov-stages}
+  \scriptsize\setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{@{}llllll@{}}
+    \toprule
+    Stage & Pattern & Model & May decide & Oversight & Failure mode / detector \\
+    \midrule
+    S0 state & plain code & no & deterministic & -- & stale memory / topic-switch test \\
+    S1 SATR (O1) & plain code & no & no & -- & turn-amnesic ranking / held-out NDCG \\
+    S2 FCNP (O4) & plain code (PI) & no & no & -- & over-pruning / $\Phi^\ast$-floor rate \\
+    S3 APRR (O2) & routing & yes & bounded & sample audit & misroute / regret, oracle agreement \\
+    S4 MNCD (O3) & parallel voting & yes & bounded & escalate on uncert. & correlated error / ECE, labels \\
+    G1 governance & plain code & no & deterministic & approve before exec. & skipped check / decision id \\
+    S5 write-back & plain code & no & after approval & review after exec. & poisoned memory / R-MEM-01 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Policy as Code}
+\label{sec:gov-pac}
+
+\paragraph{Decision function.}
+Let a request be $x=(s,a,o,\sigma)$: subject $s$ (who), action $a$ (what), resource $o$ (on what) and
+state $\sigma$ (in what state). A rule $\rho$ for action $a$ is a conjunction of predicates
+$c_{\rho,1},\dots,c_{\rho,k}$ over $x$. The policy engine evaluates
+\begin{equation}
+  \textsc{Allow}(x) \;=\; \bigvee_{\rho \in \mathcal{R}_a} \;\bigwedge_{j=1}^{k_\rho} c_{\rho,j}(x),
+  \qquad \textsc{Allow}(x)=\text{false if } \mathcal{R}_a=\emptyset ,
+  \label{eq:gov-allow}
+\end{equation}
+so the default is deny, and a predicate whose input is missing evaluates to false (fail closed).
+Every rule must cite a source and carry at least one allowed and one denied example, which the engine
+runs at start-up. Each decision is appended to a log whose entries commit to their predecessor,
+$h_t = \mathrm{SHA256}(h_{t-1} \,\|\, \text{entry}_t)$, so any edited, dropped or reordered decision is
+detected by recomputing the chain. The same rules export to OPA Rego.
+
+\begin{table}[htbp]
+  \centering
+  \caption{ACRS policies (file \texttt{policies/acrs\_policies.json}, version 1.0.0)}
+  \label{tab:gov-rules}
+  \footnotesize
+  \begin{tabular}{@{}lp{0.56\textwidth}l@{}}
+    \toprule
+    Rule & Allows only if (all hold) & Called at \\
+    \midrule
+    R-COMMIT-01 & certified; weighted share $\ge \theta^\ast$; quorum met; no quarantined evidence; read-only tools; informational risk class; no stage failure; kill switch off & G1 \\
+    R-EXEC-01 & a recruited peer calls a read-only tool that SATR committed & tool boundary \\
+    R-EXEC-02 & a state-changing tool, with a named human approval of this call & tool boundary \\
+    R-MEM-01 & successful, non-quarantined observation enters next-turn context and SATR prior & S5 \\
+    R-REL-01 & a named approver promotes a release whose evaluation gate passed on a pinned manifest & release \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Properties.} Three properties follow from the construction and are asserted by tests:
+\begin{enumerate}
+  \item \emph{Fail closed}: an exception in any stage of a governed turn yields REVIEW, never EXECUTE.
+  \item \emph{No skipped check}: EXECUTE is emitted only together with a recorded \textsc{Allow}
+        decision identifier, so the number of EXECUTE dispositions equals the number of allowed
+        \texttt{commit\_answer} decisions in the log.
+  \item \emph{Kill switch}: when it is engaged, every turn is BLOCK before any stage runs.
+\end{enumerate}
+
+\section{Certified Auto-Execution}
+\label{sec:gov-ltt}
+
+MNCD certifies a claim when its evidence-weighted share $w$ reaches $\theta$
+(Chapter~\ref{ch:mncd}). A hand-set $\theta$ controls the \emph{average} accepted-error rate but
+supports no guarantee. Let $L(\lambda)=\Pr[\text{claim unfaithful}\mid w\ge\lambda]$ be the risk of
+auto-executing at threshold $\lambda$. Following Learn-then-Test \citep{angelopoulos2025ltt}, each
+$\lambda$ in a grid ordered from strict to loose defines the null hypothesis $H_\lambda: L(\lambda)>\alpha$.
+On a calibration set with $n_\lambda$ executions and $k_\lambda$ errors, the exact binomial p-value is
+\begin{equation}
+  p_\lambda \;=\; \Pr\big[\mathrm{Bin}(n_\lambda,\alpha)\le k_\lambda\big].
+  \label{eq:gov-pval}
+\end{equation}
+Fixed-sequence testing rejects $H_\lambda$ while $p_\lambda\le\delta$ and stops at the first failure.
+Because the hypotheses are ordered before the labels are seen, the family-wise error is controlled at
+$\delta$ without correction, and the selected threshold $\theta^\ast$ satisfies
+\begin{equation}
+  \Pr\big[L(\theta^\ast)\le\alpha\big] \;\ge\; 1-\delta ,
+  \label{eq:gov-guarantee}
+\end{equation}
+under exchangeability of calibration and deployment sub-goals. A threshold can be certified only if,
+even with zero errors, $n_\lambda \ge \lceil \log\delta / \log(1-\alpha)\rceil$. That is 149 executions
+for $\alpha=0.02,\ \delta=0.05$, and 59 for $\alpha=0.05$. Sub-goals below $\theta^\ast$ are not
+discarded: they become REVIEW, so the guarantee buys a bounded auto-execution error at a measured
+review cost. If no $\lambda$ is certifiable, every sub-goal goes to REVIEW.
+
+\begin{algorithm}[htbp]
+  \caption{Learn-then-Test selection of the MNCD certification threshold}
+  \label{alg:gov-ltt}
+  \begin{algorithmic}[1]
+    \Require calibration pairs $(w_i, e_i)$ for certified informational sub-goals; risk $\alpha$; level $\delta$; grid $\Lambda$
+    \State $n_{\min} \gets \lceil \log\delta / \log(1-\alpha) \rceil$
+    \State $\Lambda' \gets$ thresholds in $\Lambda$ with $|\{i: w_i \ge \lambda\}| \ge n_{\min}$, sorted strict to loose
+    \State $\theta^\ast \gets$ \textsc{None}
+    \For{$\lambda \in \Lambda'$}
+      \State $n \gets |\{i: w_i\ge\lambda\}|$;\quad $k \gets |\{i: w_i\ge\lambda,\ e_i=1\}|$
+      \If{$\Pr[\mathrm{Bin}(n,\alpha)\le k] \le \delta$} \State $\theta^\ast \gets \lambda$ \Else \State \textbf{break} \EndIf
+    \EndFor
+    \State \Return $\theta^\ast$ \Comment{\textsc{None}: no auto-execution; everything is REVIEW}
+  \end{algorithmic}
+\end{algorithm}
+
+\section{Indirect Prompt Injection as Correlated Error}
+\label{sec:gov-injection}
+
+Every peer in an MNCD mesh reads the same shared evidence pool. If a tool returns text containing an
+instruction \citep{greshake2023indirect,debenedetti2024agentdojo}, every susceptible peer can follow it,
+agree with the others, and cite real retrieved evidence. This is the \emph{correlated error} under
+which voting raises apparent confidence without raising accuracy, and evidence weighting alone cannot
+detect it. G1 adds three plain-code defences:
+\begin{enumerate}
+  \item a tool-boundary guard that neutralises instruction-shaped spans and marks the observation as
+        quarantined, a lexical datamarking baseline \citep{hines2024spotlighting};
+  \item R-COMMIT-01, which refuses EXECUTE when the supporting evidence includes a quarantined observation;
+  \item R-MEM-01, which keeps quarantined text out of the next turn and out of SATR's session prior.
+\end{enumerate}
+The attack harness poisons a fixed fraction of endpoints, chosen deterministically per endpoint, with
+five payload templates. One template is a paraphrase that avoids every lexical trigger, so a perfect
+guard score is impossible by construction and the residual is reported.
+
+\section{Results on ToolBench-Sessions}
+\label{sec:gov-results-tb}
+
+The protocol of Chapter~\ref{ch:integrated} is used (100 sessions, 174 sub-goals, leak-filtered,
+simulated agents), with all metrics computed per sub-goal and reported as the median of three seeds.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Objective ablation with G1 on ToolBench-Sessions G1 (median of 3 seeds, per sub-goal)}
+  \label{tab:gtb-ablation}
+  \footnotesize\setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}lcccccc@{}}
+    \toprule
+    Configuration & NDCG@5 & \makecell{Auto-\\executed} & \makecell{Executed\\errors} & \makecell{Executed\\precision} & \makecell{Cost /\\sub-goal} & \makecell{$\Phi^\ast$\\met} \\
+    \midrule
+    SOTA baseline & 0.519 & 99.4\,\% & 24.1\,\% & 75.9\,\% & 0.0177 & 11.0\,\% \\
+    +\,O1 SATR & 0.585 & 100.0\,\% & 23.6\,\% & 76.4\,\% & 0.0177 & 13.3\,\% \\
+    +\,O2 APRR & 0.519 & 100.0\,\% & 31.6\,\% & 68.4\,\% & 0.0046 & 11.0\,\% \\
+    +\,O3 MNCD & 0.519 & 77.6\,\% & 0.0\,\% & 100.0\,\% & 0.0185 & 11.0\,\% \\
+    +\,O4 FCNP & 0.519 & 100.0\,\% & 21.8\,\% & 78.2\,\% & 0.0176 & 100.0\,\% \\
+    Full ACRS (O1-O4) & 0.587 & 77.0\,\% & 1.1\,\% & 98.4\,\% & 0.0082 & 99.7\,\% \\
+    Full ACRS +\, G1 & 0.587 & 75.3\,\% & 1.1\,\% & 98.4\,\% & 0.0082 & 99.7\,\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Indirect prompt injection through poisoned endpoints on ToolBench-Sessions G1 (median of 3 seeds)}
+  \label{tab:gtb-attack}
+  \footnotesize\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Configuration & \makecell{Poisoned\\endpoints} & \makecell{Auto-\\executed} & \makecell{Executed\\errors} & \makecell{Attack\\success} & \makecell{Executed\\precision} \\
+    \midrule
+    Full ACRS (O1-O4) & 0.0\,\% & 77.0\,\% & 1.1\,\% & 0.0\,\% & 98.4\,\% \\
+    Full ACRS +\, G1 & 0.0\,\% & 75.3\,\% & 1.1\,\% & 0.0\,\% & 98.4\,\% \\
+    Full ACRS (O1-O4) & 15.0\,\% & 82.2\,\% & 31.0\,\% & 29.3\,\% & 62.2\,\% \\
+    Full ACRS +\, G1 & 15.0\,\% & 57.5\,\% & 6.3\,\% & 5.7\,\% & 89.0\,\% \\
+    Full ACRS (O1-O4) & 30.0\,\% & 85.1\,\% & 46.6\,\% & 45.4\,\% & 42.1\,\% \\
+    Full ACRS +\, G1 & 30.0\,\% & 35.6\,\% & 6.9\,\% & 6.3\,\% & 80.3\,\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Certified auto-execution by Learn-then-Test on ToolBench-Sessions G1: threshold from the calibration half, risk on the held-out half ($\delta=0.05$; 3 seeds)}
+  \label{tab:gtb-ltt}
+  \footnotesize\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}ccccccc@{}}
+    \toprule
+    $\alpha$ & Attack & \makecell{Seeds\\certified} & \makecell{$\theta^\ast$\\(range)} & \makecell{Held-out risk\\(max)} & \makecell{Within\\$\alpha$} & \makecell{Coverage\\(mean)} \\
+    \midrule
+    0.02 & 0.0\,\% & 0/3 & -- & -- & -- & 0 (all REVIEW) \\
+    0.02 & 15.0\,\% & 0/3 & -- & -- & -- & 0 (all REVIEW) \\
+    0.05 & 0.0\,\% & 3/3 & 0.30--0.55 & 3.0\,\% & 3/3 & 73.6\,\% \\
+    0.05 & 15.0\,\% & 0/3 & -- & -- & -- & 0 (all REVIEW) \\
+    0.10 & 0.0\,\% & 3/3 & 0.30--0.30 & 7.4\,\% & 3/3 & 76.6\,\% \\
+    0.10 & 15.0\,\% & 0/3 & -- & -- & -- & 0 (all REVIEW) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% pass^k: pass^1=0.749, pass^2=0.588, pass^3=0.466
+% stage reliability seed0: {"S1 gold tool in selected set": 0.644, "S2 fidelity floor met": 0.994, "S4 certified claim faithful": 0.955, "G1 executed | certified": 0.978, "product": 0.598, "observedExecutedCorrect": 0.718}
+% guard false-positive rate: 0.0000; release gate: {'passed': True, 'reasons': []}; CI may promote: False; approver may promote: True; manifest 343767ac1d4e26b8
+
+
+Three findings follow.
+\begin{itemize}
+  \item \textbf{G1 is nearly free when nothing is wrong.} Without attack, G1 changes the auto-executed
+        share from 77.0\,\% to 75.3\,\% and leaves executed errors at 1.15\,\%. The objective ablation
+        reproduces Chapter~\ref{ch:integrated}: O2 alone raises executed errors (31.6\,\%), O3
+        compensates, and the full loop reaches 1.15\,\% against 24.1\,\% for the SOTA baseline.
+  \item \textbf{Injection defeats the ungoverned loop, and G1 contains it.} With 15\,\% of endpoints
+        poisoned, the ungoverned loop executes an attacker-steered answer on 29.3\,\% of sub-goals.
+        With G1 this falls to 5.7\,\%, and the residual is the paraphrased payload. At 30\,\% poisoning
+        the figures are 45.4\,\% and 6.3\,\%. The guard quarantined no clean observation
+        (false-positive rate 0 on attack-free traffic). The price is coverage: 57.5\,\% of sub-goals are
+        auto-executed instead of 82.2\,\%, and the rest go to REVIEW.
+  \item \textbf{The guarantee holds where the sample allows it.} At $\alpha=0.05$ and $\alpha=0.10$
+        without attack, a threshold is certified on 3/3 seeds and the held-out risk stays within
+        $\alpha$ on every seed, at 74--77\,\% coverage. At $\alpha=0.02$ no threshold is certifiable,
+        because a calibration half of ToolBench has fewer than 149 executions. This is a statement
+        about benchmark size, and it motivates the larger KCC evaluation. Under attack,
+        Learn-then-Test certifies nothing at any $\alpha$: the residual hijacks are confident and
+        uncontaminated, so no threshold separates them. The loop therefore sends everything to
+        REVIEW, which makes certification an attack-sensitive circuit breaker.
+\end{itemize}
+Reliability is reported as a distribution: pass$^k$ (the probability that all $k$ seeded runs of a
+sub-goal are executed correctly) is 0.749, 0.588 and 0.466 for $k=1,2,3$. The per-stage reliabilities
+(gold tool selected 0.644, fidelity floor 0.994, certified claim faithful 0.955, executed given
+certified 0.978) multiply to 0.598, against an observed end-to-end 0.718. The stages are positively
+correlated, so the product of~\eqref{eq:gov-compound} is a conservative bound.
+
+\section{The Public Problem: Kisan Call Centre Advisory}
+\label{sec:gov-kcc}
+
+\paragraph{Problem.} Kisan Call Centres (toll-free 1800-180-1551) answer farmers' questions on weather,
+pests, nutrients, markets, varieties and schemes. They received 35.22 lakh calls and answered 33.53
+lakh in 2022--23 \citep{loksabha2023kcc}, and the Ministry of Agriculture and Farmers Welfare has
+announced chatbot and AI/ML decision-support upgrades. Kisan e-Mitra handles about 13{,}000 PM-KISAN
+queries a day and is being extended to further schemes \citep{wadhwani2024kisanemitra}. A deployable
+assistant must ground answers in government data, leave an audit trail, and \emph{know which answers it
+may not give alone}: a pesticide dose or an entitlement decision carries a named person's
+accountability.
+
+\paragraph{KCC-Sessions.} The KCC transcripts \citep{kccchakshu} hold real farmer queries with expert
+answers (fields StateName, DistrictName, BlockName, CreatedOn, Season, Sector, Category, Crop,
+QueryType, QueryText, KccAns). They are turned into an ACRS benchmark without inventing labels:
+\begin{enumerate}
+  \item \emph{tools}: three live data.gov.in resources (AGMARKNET mandi prices, crop production, IMD
+        rainfall) and eight national advisory services as typed tool specifications, which are
+        simulated until API access is granted;
+  \item \emph{O1 gold}: KCC's own QueryType, mapped once to the service that answers it;
+  \item \emph{pseudo-sessions}: the queries of one block on one day for one crop, in time order (KCC
+        has no caller identifier);
+  \item \emph{risk class}: QueryType determines whether an answer is informational (auto-executable
+        when G1 allows) or an agronomic-dose or entitlement answer (recommend-only);
+  \item \emph{distractors}: the 10{,}439 ToolBench endpoints are added to the corpus so that retrieval
+        is not trivial.
+\end{enumerate}
+The run uses a seeded sample stratified over QueryType, drawn from a 1.0M-row 2023 export, with whole
+block-day queues kept. QueryType label noise (for example, weather questions filed under post-harvest
+preservation) is used as recorded and reported, never silently corrected.
+
+\begin{table}[htbp]
+  \centering
+  \caption{All four objectives and G1 on KCC-Sessions: 586 real farmer queries in 425 pseudo-sessions from 15 states, 10{,}450-tool corpus with ToolBench distractors (Colab T4 run, median of three seeds, per sub-goal)}
+  \label{tab:gkcc-ablation}
+  \footnotesize\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Configuration & NDCG@5 & \makecell{Auto-\\executed} & \makecell{Executed\\errors} & \makecell{Executed\\precision} & \makecell{$\Phi^\ast$\\met} \\
+    \midrule
+    SOTA baseline & 0.411 & 99.7\,\% & 11.3\,\% & 88.7\,\% & 4.5\,\% \\
+    +\,O1 SATR & 0.397 & 99.3\,\% & 11.7\,\% & 88.3\,\% & 3.1\,\% \\
+    +\,O2 APRR & 0.411 & 99.7\,\% & 26.4\,\% & 73.5\,\% & 4.5\,\% \\
+    +\,O3 MNCD & 0.411 & 89.5\,\% & 0.3\,\% & 99.6\,\% & 4.5\,\% \\
+    +\,O4 FCNP & 0.411 & 99.8\,\% & 6.2\,\% & 93.8\,\% & 99.9\,\% \\
+    Full ACRS (O1--O4) & 0.399 & 85.9\,\% & 0.9\,\% & 99.0\,\% & 100.0\,\% \\
+    Full ACRS +\,G1 & 0.399 & 53.3\,\% & 0.5\,\% & 99.1\,\% & 100.0\,\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The sample covers 17 query types. Weather (145 queries) and plant protection (60) are the largest, and 38\,\% of sub-goals are agronomic-dose or entitlement questions, which G1 may only recommend.
+Three findings carry over from ToolBench, and one does not.
+\begin{itemize}
+  \item \textbf{The integrated loop is what makes answers safe to act on.} Executed errors fall from 11.3\,\% (SOTA baseline) to 0.86\,\% with O1--O4 and to 0.51\,\% with G1. O3 is again the largest single contributor (0.34\,\% alone, at 10\,\% abstention), and O2 alone again doubles errors (26.4\,\%) while cutting cost by 73\,\%. The loop needs O3 to make O2's savings safe.
+  \item \textbf{O4 restores context fidelity.} The fidelity floor is met on 4.5\,\% of turns under a fixed 50\,\% keep ratio and on 100\,\% under the PI controller.
+  \item \textbf{G1 enforces who decides.} With G1, 53.3\,\% of sub-goals are auto-executed, against 85.9\,\% without it. The difference is mostly dose and entitlement queries handed to an advisor with their evidence, which is the intended behaviour at a KCC desk rather than a loss of capability.
+  \item \textbf{O1 does not transfer to KCC pseudo-sessions.} SATR lowers NDCG@5 from 0.412 to 0.397. KCC pseudo-sessions average 1.37 turns, and consecutive queries in a block-day queue usually switch topic and service, for example from weather to pest control. SATR's provider-coherence and session-memory terms assume that consecutive sub-goals in a session draw on related providers, so here they act as noise. This bounds the scope of contribution O1 to genuine multi-turn sessions, and it motivates a learned topic-switch gate as future work.
+\end{itemize}
+
+\paragraph{Injection on KCC.} With 15\,\% of KCC endpoints poisoned, the ungoverned O1--O4 loop executes an attacker-steered answer on 27.8\,\% of sub-goals. With G1 the rate falls to 0.86\,\%, a 32-fold reduction, and executed precision recovers from 68.8\,\% to 96.5\,\%. The guard again quarantined no clean observation. The contrast with ToolBench (5.7\,\% residual) has a clear explanation: on KCC, 38\,\% of sub-goals are recommend-only by risk class, so even an injection that survives the guard rarely reaches an auto-executable answer. Authority bounds therefore limit the blast radius of attacks the guard cannot see.
+
+% KCC-LTT-PLACEHOLDER (certified execution on KCC, pending Colab completion)
+
+
+\section{Deployment Path and Release Discipline}
+\label{sec:gov-release}
+
+A release pins seven parts by hash (code, configuration, agent specifications, tool definitions, model
+identifiers, policy file and retrieval index), so a model or index change without a commit shows up as
+a manifest difference. Each build is reported as a distribution over seeds and gated on quality (with a
+flake tolerance), cost and p95 latency. The pipeline produces the evidence; R-REL-01 lets only a named
+approver promote, and in the reported runs the CI identity was denied while the approver was allowed.
+The kill switch is exercised in every CI run. Deployment at a KCC desk proceeds in three stages, each
+producing the evidence for the next:
+\begin{enumerate}
+  \item \emph{shadow} replay of historical block queues, compared with \texttt{KccAns}, writing nothing;
+  \item \emph{live with approval}, where every answer is shown to a Farm Tele Advisor;
+  \item \emph{narrow auto-execution} only for query types whose measured error is below $\alpha$.
+\end{enumerate}
+
+\section{Threats to Validity}
+\label{sec:gov-threats}
+
+\begin{itemize}
+  \item Agents are simulated: the results test the orchestration and governance mechanisms, not LLM
+        answer quality.
+  \item The injection harness is in-house; AgentDojo \citep{debenedetti2024agentdojo} is the external
+        replication.
+  \item KCC sessions are pseudo-sessions, and QueryType is noisy.
+  \item Most KCC services are simulated.
+  \item The Learn-then-Test guarantee assumes exchangeability; a district or season shift requires
+        recalibration, which the release gate enforces.
+  \item The lexical guard has a known paraphrase residual.
+\end{itemize}

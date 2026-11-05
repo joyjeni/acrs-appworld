@@ -1,0 +1,36 @@
+\chapter*{Abstract}
+
+Language-model agents now act inside applications on a person's behalf: they find the right APIs, call
+them, read the results and change the state of the world. Over many steps their reliability compounds
+downward, and the systems that perform best on public agent benchmarks rely on frontier models and
+report only task success, not cost, collateral damage or robustness to manipulated tool output. In the
+literature the four operations every step needs (retrieving APIs, choosing a model, deciding whether an
+action can be trusted, and managing a growing history) are optimised separately and per step.
+
+This thesis proposes the Adaptive Context Reasoning System (ACRS), a closed-loop architecture in which
+four mechanisms share one episode state. \emph{Session-Adaptive Tool Scoring} (SATR) ranks APIs by their
+utility given what the episode has already used, with training-free signals. \emph{Risk-Weighted Policy
+Routing} (APRR) is a contextual-bandit router between model tiers whose exploration changes sign with
+the episode's risk. \emph{Byzantine-Tolerant Consensus} (MNCD) certifies an answer only when independent
+agents agree on grounded evidence, and certifies a state-changing action only when independently
+generated candidate programs, executed from a saved state, agree on the change they cause; it abstains
+otherwise, and its threshold is set by Learn-then-Test so that the error rate of executed actions carries
+a finite-sample guarantee. \emph{PID-Controlled Provenance Pruning} (FCNP) compresses history under a
+budget set by a proportional--integral controller while holding a fidelity floor. A deny-by-default
+policy-as-code stage decides which certified actions may execute without a person, and every decision
+is logged in a tamper-evident chain.
+
+ACRS is evaluated in three layers. On 100 sessionised ToolBench sessions with simulated agents and a
+leak-free protocol (94 of the 100 test gold sets were found in the training data and removed), SATR
+improves held-out NDCG@5 by 12.4\,\% over BM25, MNCD lowers accepted errors from 24.0\,\% to 0.6\,\%,
+FCNP meets its fidelity floor on 99.7\,\% of turns while removing 47\,\% of tokens, and with 15\,\% of
+endpoints poisoned the governance stage cuts the success of injection attacks from 29.3\,\% to 5.7\,\%.
+On KCC-Sessions, built from real Kisan Call Centre farmer queries, the integrated loop lowers executed
+errors from 11.3\,\% to 0.51\,\% and injection success from 27.8\,\% to 0.86\,\%, while routing pesticide-dose
+and entitlement questions to a human advisor. On AppWorld, ACRS is run with open-weight Qwen3 models on a
+single free or low-cost GPU and scored with the benchmark's official evaluator, its collateral-damage
+tests and paired significance tests (Chapter~\ref{ch:appworld}). Code and aggregate results are public.
+
+\vspace{0.4cm}
+\noindent\textbf{Keywords:} agentic AI, tool retrieval, contextual bandits, Byzantine consensus,
+certified execution, context compression, AppWorld, Kisan Call Centre
