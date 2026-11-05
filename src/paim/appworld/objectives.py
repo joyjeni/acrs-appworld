@@ -174,6 +174,21 @@ class ConsensusResult:
     reason: str
 
 
+
+
+def restore_state(world: Any, state_id: str) -> None:
+    """Restore a saved world state.
+
+    AppWorld 0.1.3's ``load_state`` calls ``AppWorld.close_all()``, which stops the task's
+    frozen clock but does not restart it; the episode then crashes when the world closes and
+    stops the clock again (freezegun: ``fake_names`` / ``pop from empty list``), and every API
+    call in between runs on real time. Restart the clock after restoring.
+    """
+    world.load_state(state_id)
+    if getattr(world, "remote_environment_url", None) is None and hasattr(world, "_set_datetime"):
+        world._set_datetime()
+
+
 @dataclass
 class OutcomeConsensus:
     """ARC-style execute-and-vote over candidate programs, on state-changing steps.
@@ -218,7 +233,7 @@ class OutcomeConsensus:
                           signature=call_signatures(code, self.catalog),
                           weight=0.0 if err else 1.0)
             )
-            world.load_state(state_id)
+            restore_state(world, state_id)
         self.stats["consensus_steps"] += 1
         self.stats["candidate_executions"] += len(cands)
         groups: dict[tuple, float] = defaultdict(float)

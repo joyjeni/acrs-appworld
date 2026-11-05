@@ -19,6 +19,8 @@ import argparse
 import json
 import multiprocessing as mp
 import os
+import re
+from collections import Counter
 import sys
 import time
 from dataclasses import replace
@@ -146,6 +148,8 @@ def main() -> None:
         "stopReasons": {r: sum(e.get("stop_reason") == r for e in ok) for r in sorted({e.get("stop_reason", "") for e in ok})},
         "errorStepRate": sum(e.get("errors", 0) for e in ok) / max(1, sum(e["steps"] for e in ok)),
         "episodeErrors": sorted({e["error"][:160] for e in eps if "error" in e})[:5],
+        # Most frequent error messages in executed steps (digits masked so similar errors group).
+        "topStepErrors": Counter(re.sub(r"\d+", "#", m) for e in ok for m in e.get("error_samples", [])).most_common(10),
         "policyDenials": sum(e["policy_denials"] for e in ok),
         "consensus": {k: sum(e["consensus"].get(k, 0) for e in ok) for k in
                       ("consensus_steps", "certified", "abstain_disagree", "abstain_all_failed", "candidate_executions")},

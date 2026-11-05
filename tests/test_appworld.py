@@ -185,3 +185,26 @@ def test_baseline_config_is_plain_react():
     agent = ACRSAppWorldAgent(w, cli, cli, AgentConfig.baseline())
     log = agent.run()
     assert log.completed and log.consensus == {} and agent.policy is None
+
+
+def test_restore_state_restarts_frozen_clock():
+    """AppWorld 0.1.3 load_state stops the task clock; restore_state must restart it."""
+    from paim.appworld.objectives import restore_state
+
+    class ClockWorld:
+        remote_environment_url = None
+
+        def __init__(self):
+            self.clock_running = True
+            self.restarts = 0
+
+        def load_state(self, sid):
+            self.clock_running = False  # close_all() stops every time freezer
+
+        def _set_datetime(self):
+            self.clock_running = True
+            self.restarts += 1
+
+    w = ClockWorld()
+    restore_state(w, "s1")
+    assert w.clock_running and w.restarts == 1

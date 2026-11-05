@@ -83,6 +83,7 @@ class EpisodeLog:
     completed: bool = False
     stop_reason: str = ""
     errors: int = 0
+    error_samples: list[str] = field(default_factory=list)  # last line of up to 15 error outputs
     policy_denials: int = 0
     consensus: dict[str, int] = field(default_factory=dict)
     router: dict[str, int] = field(default_factory=dict)
@@ -218,6 +219,9 @@ class ACRSAppWorldAgent:
 
             err = is_error(output)
             self.log.errors += int(err)
+            if err and len(self.log.error_samples) < 15:
+                lines = [l.strip() for l in str(output).strip().splitlines() if l.strip()]
+                self.log.error_samples.append(lines[-1][:160] if lines else "")
             self.router.update(ctx, arm, not err)
             self.retriever.observe(code)
             self.turns.append((code, output))
