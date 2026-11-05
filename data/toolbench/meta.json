@@ -1,0 +1,23 @@
+{
+ "builtAt": "2026-09-05T17:23:08Z",
+ "endpoints": 10439,
+ "originalRelease": "Qin et al. 2023, https://github.com/OpenBMB/ToolBench",
+ "sessionisation": {
+  "avgTurns": 1.74,
+  "goldJudgements": 451,
+  "goldPreserved": 451,
+  "labelPreserving": true,
+  "multiTurnFraction": 0.61,
+  "multiTurnSessions": 61,
+  "sessions": 100,
+  "turnHistogram": {
+   "1": 39,
+   "2": 48,
+   "3": 13
+  }
+ },
+ "source": "Adorg/ToolBench (Hugging Face mirror of ToolBench G1 retrieval split)",
+ "testJudgements": 451,
+ "testQueries": 100,
+ "trainTrajectories": 82599
+}

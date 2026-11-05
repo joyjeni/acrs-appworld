@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paim"
+version = "0.1.0"
+description = "Integrated session-aware, risk-routed, mesh-deliberated and fidelity-pruned agentic AI framework (PhD research proposal reference implementation)"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jenisha T", email = "joyjeni@gmail.com" }]
+
+# The reference implementation is deliberately dependency-light so that it runs
+# unchanged inside a Kaggle notebook with "Internet: off".
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# Only needed for figure generation and the experiment report.
+viz = ["matplotlib>=3.7"]
+# Optional dense first-stage retriever. The pipeline falls back to BM25 when absent.
+dense = ["sentence-transformers>=2.2"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+slides = ["python-pptx>=0.6.23"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

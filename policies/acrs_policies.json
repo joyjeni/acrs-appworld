@@ -1,0 +1,112 @@
+{
+  "version": "acrs-policy-1.0.0",
+  "description": "ACRS Policy-as-Code. Deny by default; every condition must hold; each rule traced to a source and tested both ways. Evaluated by paim.governance.policy.PolicyEngine and exportable to OPA Rego.",
+  "params": {
+    "theta": 0.5,
+    "informational_classes": ["informational"]
+  },
+  "rules": [
+    {
+      "id": "R-COMMIT-01",
+      "action": "commit_answer",
+      "description": "Auto-execute a mesh answer only on a clear, certified, uncontaminated, informational result.",
+      "source": "Thesis design requirement DR-3 (fail closed; a failure never releases); Learn-then-Test threshold (Angelopoulos et al., Ann. Appl. Stat. 2025); indirect prompt-injection threat model (Greshake et al., AISec 2023).",
+      "all": [
+        {"field": "subject.role", "op": "==", "value": "mesh"},
+        {"field": "resource.certified", "op": "is_true"},
+        {"field": "resource.weighted_share", "op": ">=", "value": "$theta"},
+        {"field": "resource.quorum_ok", "op": "is_true"},
+        {"field": "resource.quarantined_evidence", "op": "==", "value": 0},
+        {"field": "resource.side_effect", "op": "==", "value": "read"},
+        {"field": "resource.risk_class", "op": "in", "value": "$informational_classes"},
+        {"field": "state.stage_failures", "op": "==", "value": 0},
+        {"field": "state.kill_switch", "op": "is_false"}
+      ],
+      "examples": {
+        "allow": [
+          {"subject": {"role": "mesh"}, "resource": {"certified": true, "weighted_share": 0.81, "quorum_ok": true, "quarantined_evidence": 0, "side_effect": "read", "risk_class": "informational"}, "state": {"stage_failures": 0, "kill_switch": false}}
+        ],
+        "deny": [
+          {"subject": {"role": "mesh"}, "resource": {"certified": true, "weighted_share": 0.81, "quorum_ok": true, "quarantined_evidence": 1, "side_effect": "read", "risk_class": "informational"}, "state": {"stage_failures": 0, "kill_switch": false}},
+          {"subject": {"role": "mesh"}, "resource": {"certified": true, "weighted_share": 0.81, "quorum_ok": true, "quarantined_evidence": 0, "side_effect": "read", "risk_class": "agronomic-dose"}, "state": {"stage_failures": 0, "kill_switch": false}},
+          {"subject": {"role": "mesh"}, "resource": {"certified": true, "weighted_share": 0.40, "quorum_ok": true, "quarantined_evidence": 0, "side_effect": "read", "risk_class": "informational"}, "state": {"stage_failures": 0, "kill_switch": false}},
+          {"subject": {"role": "mesh"}, "resource": {"certified": true, "weighted_share": 0.90, "quorum_ok": true, "quarantined_evidence": 0, "side_effect": "read", "risk_class": "informational"}, "state": {"stage_failures": 1, "kill_switch": false}},
+          {"subject": {"role": "mesh"}, "resource": {"certified": true, "weighted_share": 0.90, "quorum_ok": true, "quarantined_evidence": 0, "side_effect": "read", "risk_class": "informational"}}
+        ]
+      }
+    },
+    {
+      "id": "R-EXEC-01",
+      "action": "execute_tool",
+      "description": "A recruited peer may call a read-only tool that SATR committed for this sub-goal.",
+      "source": "Capability vs authority separation (thesis Ch. 7); least privilege; ToolBench/StableToolBench tool schema.",
+      "all": [
+        {"field": "subject.role", "op": "==", "value": "peer"},
+        {"field": "resource.in_committed_set", "op": "is_true"},
+        {"field": "resource.side_effect", "op": "==", "value": "read"},
+        {"field": "state.kill_switch", "op": "is_false"}
+      ],
+      "examples": {
+        "allow": [{"subject": {"role": "peer"}, "resource": {"in_committed_set": true, "side_effect": "read"}, "state": {"kill_switch": false}}],
+        "deny": [
+          {"subject": {"role": "peer"}, "resource": {"in_committed_set": false, "side_effect": "read"}, "state": {"kill_switch": false}},
+          {"subject": {"role": "peer"}, "resource": {"in_committed_set": true, "side_effect": "write"}, "state": {"kill_switch": false}}
+        ]
+      }
+    },
+    {
+      "id": "R-EXEC-02",
+      "action": "execute_tool",
+      "description": "A state-changing tool runs only after a named human approved this exact call (approve-before-execute).",
+      "source": "Irreversibility test: an action that cannot be cheaply undone needs a person who chose it (thesis Ch. 7, oversight design table).",
+      "all": [
+        {"field": "subject.role", "op": "==", "value": "peer"},
+        {"field": "resource.in_committed_set", "op": "is_true"},
+        {"field": "resource.side_effect", "op": "==", "value": "write"},
+        {"field": "state.human_approval", "op": "is_true"},
+        {"field": "state.kill_switch", "op": "is_false"}
+      ],
+      "examples": {
+        "allow": [{"subject": {"role": "peer"}, "resource": {"in_committed_set": true, "side_effect": "write"}, "state": {"human_approval": true, "kill_switch": false}}],
+        "deny": [{"subject": {"role": "peer"}, "resource": {"in_committed_set": true, "side_effect": "write"}, "state": {"human_approval": false, "kill_switch": false}}]
+      }
+    },
+    {
+      "id": "R-MEM-01",
+      "action": "write_memory",
+      "description": "Only successful, non-quarantined observations may enter the next turn's context and SATR's session prior.",
+      "source": "O4 -> O1 write-back is a persistence channel for injected text (AgentDojo, Debenedetti et al., NeurIPS 2024 D&B).",
+      "all": [
+        {"field": "resource.ok", "op": "is_true"},
+        {"field": "resource.quarantined", "op": "is_false"},
+        {"field": "state.kill_switch", "op": "is_false"}
+      ],
+      "examples": {
+        "allow": [{"subject": {"role": "pipeline"}, "resource": {"ok": true, "quarantined": false}, "state": {"kill_switch": false}}],
+        "deny": [
+          {"subject": {"role": "pipeline"}, "resource": {"ok": true, "quarantined": true}, "state": {"kill_switch": false}},
+          {"subject": {"role": "pipeline"}, "resource": {"ok": false, "quarantined": false}, "state": {"kill_switch": false}}
+        ]
+      }
+    },
+    {
+      "id": "R-REL-01",
+      "action": "promote_release",
+      "description": "Automate the evidence, not the authority: a release is promoted by a named approver after the evaluation gate passed on a pinned manifest.",
+      "source": "Release governance requirement DR-7; seven-part manifest (paim.governance.release).",
+      "all": [
+        {"field": "subject.role", "op": "==", "value": "approver"},
+        {"field": "subject.name", "op": "!=", "value": ""},
+        {"field": "resource.gate_passed", "op": "is_true"},
+        {"field": "resource.manifest_digest", "op": "!=", "value": ""}
+      ],
+      "examples": {
+        "allow": [{"subject": {"role": "approver", "name": "release-owner"}, "resource": {"gate_passed": true, "manifest_digest": "abc"}, "state": {}}],
+        "deny": [
+          {"subject": {"role": "pipeline", "name": "ci"}, "resource": {"gate_passed": true, "manifest_digest": "abc"}, "state": {}},
+          {"subject": {"role": "approver", "name": "release-owner"}, "resource": {"gate_passed": false, "manifest_digest": "abc"}, "state": {}}
+        ]
+      }
+    }
+  ]
+}
