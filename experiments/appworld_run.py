@@ -26,6 +26,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+# AppWorld resolves data/ and experiments/outputs/ against the working directory; keep them out of
+# the repo (whose data/ holds the ToolBench bundle) when APPWORLD_ROOT is set.
+if os.environ.get("APPWORLD_ROOT"):
+    os.chdir(os.environ["APPWORLD_ROOT"])
 
 from paim.appworld import ACRSAppWorldAgent, AgentConfig, ChatClient, ModelTier  # noqa: E402
 
