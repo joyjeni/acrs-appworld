@@ -64,8 +64,13 @@ def worker(args_tuple):
         t0 = time.time()
         try:
             with AppWorld(task_id=tid, experiment_name=exp, max_interactions=cfg.max_steps * (cfg.consensus_n + 1) + 10) as world:
-                log = ACRSAppWorldAgent(world, small, large, cfg, seed=seed).run()
-                row = log.to_dict()
+                try:
+                    log = ACRSAppWorldAgent(world, small, large, cfg, seed=seed).run()
+                    row = log.to_dict()
+                finally:
+                    # Always persist the end state, so the official evaluator can score the episode.
+                    if hasattr(world, "save"):
+                        world.save()
         except Exception as e:  # fail closed: record, never crash the batch
             row = {"task_id": tid, "error": f"{type(e).__name__}: {e}", "seconds": time.time() - t0}
         rows.append(row)
@@ -107,7 +112,18 @@ def main() -> None:
 
     # Official scorer. On a full split this equals `appworld evaluate <exp> <split>`;
     # per-task details are kept for paired tests (McNemar / bootstrap) between configs.
-    report = evaluate_tasks(ids, experiment_name=exp, include_details=True)
+    # Fail closed: a task whose end state was not saved (crashed worker) is scored as failed, not dropped.
+    out_root = Path(os.environ.get("APPWORLD_ROOT", ".")) / "experiments/outputs" / exp / "tasks"
+    scorable = [t for t in ids if (out_root / t / "dbs").exists()]
+    missing = [t for t in ids if t not in scorable]
+    report = evaluate_tasks(scorable, experiment_name=exp, include_details=True) if scorable else {"aggregate": {}, "individual": {}}
+    for t in missing:
+        report.setdefault("individual", {})[t] = {"success": False, "missing_output": True, "failures": []}
+    if missing and scorable:
+        # Re-normalise the official task-level rate over all attempted tasks.
+        agg = report.setdefault("aggregate", {})
+        if "task_goal_completion" in agg:
+            agg["task_goal_completion"] = agg["task_goal_completion"] * len(scorable) / len(ids)
     (out_dir / f"{exp}.evaluation.json").write_text(json.dumps(report, default=str))
     # Collateral damage: a failed test labelled "no_op_pass" passes when the agent
     # does nothing, so failing it means the agent changed something it should not have.
@@ -123,6 +139,7 @@ def main() -> None:
         "experiment": exp, "split": args.split, "config": args.config, "tasks": len(ids),
         "official": report.get("aggregate", {}),
         "episodesFailed": len(eps) - len(ok),
+        "missingOutputs": len(missing),
         "collateralDamageRate": collateral,
         "meanSteps": sum(e["steps"] for e in ok) / max(1, len(ok)),
         # Diagnostics: why episodes ended, and how often an executed step raised an error.
