@@ -46,6 +46,8 @@ def test_trailing_expression_is_printed():
     assert show_last_expression("def (") == "def ("
     multi = "apis.venmo.login(\n    username='a',\n    password='b')"
     assert show_last_expression(multi).startswith("print(apis.venmo.login(")
+    assert show_last_expression("p = 1\np  # the passwords") == "p = 1\nprint(p)  # the passwords"
+    assert show_last_expression("s = 'é'\ns  # é") == "s = 'é'\nprint(s)  # é"
 
 
 def test_silent_api_call_gets_a_hint():
