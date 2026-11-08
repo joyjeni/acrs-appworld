@@ -139,6 +139,51 @@ def call_signatures(code: str, catalog: ApiCatalog) -> tuple[str, ...]:
     return tuple(sigs)
 
 
+SILENT_OUTPUT_HINT = "(nothing was printed: print() the values you need to see)"
+
+
+def show_last_expression(code: str) -> str:
+    """Print a trailing bare expression, as a notebook would.
+
+    AppWorld's shell returns only what the code prints, so `passwords` on its own line comes back as
+    "Execution successful." and a small model then guesses the values. Part of the shared harness: the same for
+    the baseline and every ablation. print()/complete_task() calls and unparsable code are left unchanged.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+    if not tree.body or not isinstance(tree.body[-1], ast.Expr):
+        return code
+    value = tree.body[-1].value
+    if isinstance(value, ast.Call):
+        fn = value.func
+        name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else ""
+        if name in ("print", "complete_task", "display"):
+            return code
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return code
+    last = tree.body[-1]
+    if last.col_offset != 0 or last.end_lineno is None:          # e.g. `a = f(); a`
+        tree.body[-1] = ast.Expr(ast.Call(ast.Name("print", ast.Load()), [value], []))
+        return ast.unparse(ast.fix_missing_locations(tree))
+    lines = code.splitlines()
+    seg = lines[last.lineno - 1:last.end_lineno]
+    end = seg[-1].encode()                          # end_col_offset counts UTF-8 bytes
+    head, tail = end[:last.end_col_offset].decode(), end[last.end_col_offset:].decode()   # tail: a comment
+    segment = "\n".join(seg[:-1] + [head])
+    return "\n".join(lines[:last.lineno - 1] + [f"print({segment}){tail}"] + lines[last.end_lineno:])
+
+
+def with_silence_hint(code: str, output: str) -> str:
+    """Flag API calls that printed nothing, so the model does not read silence as an answer."""
+    if (output or "").strip() in ("", "Execution successful.") and re.search(r"apis\.\w+\.\w+\s*\(", code or ""):
+        return ((output or "").strip() + " " + SILENT_OUTPUT_HINT).strip()
+    return output
+
+
 def is_error(output: str) -> bool:
     o = output or ""
     return "Traceback" in o or "Execution failed" in o or "Exception:" in o

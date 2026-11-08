@@ -16,12 +16,13 @@ token ceiling (bounded agent loop).
 from __future__ import annotations
 
 import re
-import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from paim.appworld.catalog import ApiCatalog, is_error, iter_rendered, write_calls
+from paim.appworld.catalog import (ApiCatalog, is_error, iter_rendered, show_last_expression, with_silence_hint,
+                                   write_calls)
 from paim.appworld.llm import ChatClient, Usage
+from paim.common import clock
 from paim.appworld.objectives import (
     HistoryGovernor,
     OutcomeConsensus,
@@ -66,6 +67,10 @@ class AgentConfig:
     sample_temperature: float = 0.7
     max_tokens_step: int = 768
     budget_tokens: int = 6000
+    # Hard prompt limit shared by every config (the server's max model length minus the reply). 0 = off.
+    # Without it a long episode overflows the server's context and the whole episode fails on an HTTP 400,
+    # which would count against whichever config keeps more history.
+    context_limit_tokens: int = 0
 
     @staticmethod
     def baseline() -> "AgentConfig":
@@ -90,6 +95,8 @@ class EpisodeLog:
     fidelity_mean: float = 1.0
     usage: dict[str, Any] = field(default_factory=dict)
     seconds: float = 0.0
+    window_dropped: int = 0      # history turns dropped to respect context_limit_tokens
+    success: bool | None = None  # AppWorld's own per-task test result (train/dev), recorded by the runner
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -159,6 +166,29 @@ class ACRSAppWorldAgent:
         for code, out in history:
             msgs.append({"role": "assistant", "content": f"```python\n{code}\n```"})
             msgs.append({"role": "user", "content": f"Output:\n{out[:6000]}"})
+        return self._fit_limit(msgs)
+
+    def _fit_limit(self, msgs: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Drop the oldest (code, output) turns until the prompt fits context_limit_tokens.
+
+        Conservative estimate (3 characters per token, since JSON and code tokenise densely). The system prompt,
+        the task and the latest turn are always kept.
+        """
+        limit = self.cfg.context_limit_tokens
+        if limit <= 0:
+            return msgs
+        budget = limit - self.cfg.max_tokens_step
+
+        def size() -> int:
+            return sum(len(m["content"]) for m in msgs) // 3 + 8 * len(msgs)
+
+        dropped = 0
+        while size() > budget and len(msgs) > 4:
+            del msgs[2:4]
+            dropped += 1
+        if dropped:
+            self.log.window_dropped += dropped
+            msgs[1] = {"role": "user", "content": msgs[1]["content"] + f"\n({dropped} earlier steps not shown: context limit)"}
         return msgs
 
     def _total_tokens(self) -> int:
@@ -166,7 +196,7 @@ class ACRSAppWorldAgent:
 
     # ------------------------------------------------------------------ loop
     def run(self) -> EpisodeLog:
-        t0 = time.time()
+        t0 = clock.perf_counter()
         last_error = False
         for step in range(self.cfg.max_steps):
             if self._total_tokens() > self.cfg.max_total_tokens:
@@ -178,7 +208,7 @@ class ACRSAppWorldAgent:
             arm = self.router.choose(ctx)
             client = self.clients[arm]
             text = client.complete(msgs, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens_step)[0]
-            code = extract_code(text)
+            code = show_last_expression(extract_code(text))
 
             # G1: policy before any execution
             if self.policy is not None:
@@ -197,12 +227,12 @@ class ACRSAppWorldAgent:
                         return []
                     outs = client.complete(msgs, temperature=self.cfg.sample_temperature,
                                            max_tokens=self.cfg.max_tokens_step, n=k)
-                    return [extract_code(o) for o in outs]
+                    return [show_last_expression(extract_code(o)) for o in outs]
 
                 res = self.consensus.run(self.world, code, sample, step)
                 if res.certified and res.winner is not None:
                     code = res.winner.code
-                    output = self.world.execute(code)
+                    output = with_silence_hint(code, self.world.execute(code))
                 else:
                     # abstain: do not commit; tell the agent and escalate next step
                     summary = "; ".join(
@@ -215,7 +245,7 @@ class ACRSAppWorldAgent:
                     last_error = True
                     continue
             else:
-                output = self.world.execute(code)
+                output = with_silence_hint(code, self.world.execute(code))
 
             err = is_error(output)
             self.log.errors += int(err)
@@ -240,7 +270,7 @@ class ACRSAppWorldAgent:
         for c in self.clients.values():
             u.add(c.usage)
         self.log.usage = u.to_dict()
-        self.log.seconds = time.time() - t0
+        self.log.seconds = clock.perf_counter() - t0
         return self.log
 
 
