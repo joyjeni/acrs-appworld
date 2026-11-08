@@ -16,6 +16,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from paim.common import clock
+
 
 @dataclass
 class ModelTier:
@@ -83,7 +85,7 @@ class ChatClient:
         url = self.tier.base_url.rstrip("/") + "/chat/completions"
         last: Exception | None = None
         for attempt in range(self.retries):
-            t0 = time.time()
+            t0 = clock.perf_counter()
             try:
                 req = urllib.request.Request(url, data=data, headers=headers)
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
@@ -93,7 +95,7 @@ class ChatClient:
                     calls=1,
                     prompt_tokens=int(u.get("prompt_tokens", 0)),
                     completion_tokens=int(u.get("completion_tokens", 0)),
-                    seconds=time.time() - t0,
+                    seconds=clock.perf_counter() - t0,
                 )
                 inc.cost = (
                     inc.prompt_tokens / 1000 * self.tier.cost_per_1k_in
@@ -102,6 +104,13 @@ class ChatClient:
                 with self._lock:
                     self.usage.add(inc)
                 return [c["message"]["content"] or "" for c in resp.get("choices", [])]
+            except urllib.error.HTTPError as e:   # keep the server's message (e.g. context length, OOM)
+                try:
+                    detail = e.read().decode(errors="replace")[:400]
+                except Exception:  # noqa: BLE001
+                    detail = ""
+                last = RuntimeError(f"HTTP {e.code}: {detail}")
+                time.sleep(2 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as e:
                 last = e
                 time.sleep(2 * (attempt + 1))

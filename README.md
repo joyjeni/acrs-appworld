@@ -29,7 +29,7 @@ Every objective has an `enabled` switch, and its disabled form is the SOTA analo
 ## Run
 
 ```bash
-python -m pytest -q tests          # 40 offline tests (fake AppWorld world; no GPU)
+python -m pytest -q tests          # 48 offline tests (fake AppWorld world; no GPU)
 ```
 
 On a GPU, open [`experiments/ACRS_appworld.ipynb`](experiments/ACRS_appworld.ipynb) in Colab (Pro) or Kaggle and choose Run all. It picks Qwen3-32B/14B/8B-AWQ by GPU memory, serves the models with vLLM, runs the `dev` pilot and ablations, and reports official TGC/SGC, collateral damage, cost, and McNemar/bootstrap tests.
@@ -47,6 +47,12 @@ On a GPU, open [`experiments/ACRS_appworld.ipynb`](experiments/ACRS_appworld.ipy
   - policy denials;
   - history fidelity.
 - Candidate exploration uses AppWorld's `save_state`/`load_state`. Executions count toward the interaction budget and are disclosed in every result.
+
+## Running on Kaggle
+
+The notebook stops between tasks at `ACRS_HARD_STOP_H` (default 11 h), passes the server's context length to every
+config (`--context-limit`), and resumes a config's episode log within a session (`--resume`). Harness problems
+found on Kaggle and how they are handled: [`docs/KAGGLE_FINDINGS.md`](docs/KAGGLE_FINDINGS.md).
 
 ## Licence and data
 
