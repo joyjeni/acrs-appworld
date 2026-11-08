@@ -11,6 +11,10 @@ leave-one-out ablations no_o1 / no_o2 / no_o3 / no_o4 / no_g1.
 Official TGC/SGC come from appworld.evaluator.evaluate_dataset; the per-episode
 log adds cost, router decisions, consensus counts, policy denials and fidelity.
 Rules followed: tune on train/dev only; test splits are run once per final config.
+
+Kaggle sessions stop at 12 hours: ACRS_DEADLINE (Unix seconds) stops workers between tasks, and --resume keeps
+the episode log and skips tasks already in it. Each train/dev episode records AppWorld's own per-task test result,
+so a resumed run can be scored even when an earlier session's app databases are gone.
 """
 
 from __future__ import annotations
@@ -22,7 +26,6 @@ import os
 import re
 from collections import Counter
 import sys
-import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -34,6 +37,7 @@ if os.environ.get("APPWORLD_ROOT"):
     os.chdir(os.environ["APPWORLD_ROOT"])
 
 from paim.appworld import ACRSAppWorldAgent, AgentConfig, ChatClient, ModelTier  # noqa: E402
+from paim.common import clock  # noqa: E402  (imported before AppWorld freezes time)
 
 CONFIGS = {
     "baseline": replace(AgentConfig.baseline(), k_apis=0),
@@ -52,18 +56,44 @@ def tier(spec: str, name: str) -> ModelTier:
     return ModelTier(name=model, base_url=url, tier=name, extra_body=extra)
 
 
+def deadline_reached() -> bool:
+    """True once the real wall clock passes ACRS_DEADLINE (Unix seconds); unset means no deadline."""
+    raw = os.environ.get("ACRS_DEADLINE", "")
+    return bool(raw) and clock.wall_time() >= float(raw)
+
+
+def task_result(world) -> dict:
+    """AppWorld's own tests for this task (train/dev only). Empty if the evaluator is unavailable."""
+    try:
+        tracker = world.evaluate()
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for name in ("success", "pass_count", "fail_count", "num_tests"):
+        val = getattr(tracker, name, None)
+        if isinstance(val, (bool, int, float)):
+            out[name] = val
+    if "success" not in out and hasattr(tracker, "to_dict"):
+        d = tracker.to_dict()
+        if isinstance(d, dict) and isinstance(d.get("success"), bool):
+            out["success"] = d["success"]
+    return out
+
+
 def worker(args_tuple):
-    task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path = args_tuple
+    task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path, context_limit, record = args_tuple
     from appworld import AppWorld
 
-    cfg = CONFIGS[cfg_name]
+    cfg = replace(CONFIGS[cfg_name], context_limit_tokens=context_limit)
     small = ChatClient(tier(small_spec, "small"))
     large = ChatClient(tier(large_spec, "large"))
     rows = []
     for tid in task_ids:
+        if deadline_reached():
+            break
         small.usage.__init__()
         large.usage.__init__()
-        t0 = time.time()
+        t0 = clock.wall_time()
         try:
             with AppWorld(task_id=tid, experiment_name=exp, max_interactions=cfg.max_steps * (cfg.consensus_n + 1) + 10) as world:
                 try:
@@ -73,8 +103,10 @@ def worker(args_tuple):
                     # Always persist the end state, so the official evaluator can score the episode.
                     if hasattr(world, "save"):
                         world.save()
+                if record:
+                    row.update(task_result(world))
         except Exception as e:  # fail closed: record, never crash the batch
-            row = {"task_id": tid, "error": f"{type(e).__name__}: {e}", "seconds": time.time() - t0}
+            row = {"task_id": tid, "error": f"{type(e).__name__}: {e}", "seconds": clock.wall_time() - t0}
         rows.append(row)
         with open(out_path, "a") as fh:
             fh.write(json.dumps(row) + "\n")
@@ -91,6 +123,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag", default="")
+    ap.add_argument("--context-limit", type=int, default=0,
+                    help="prompt limit in tokens for every config (server max model length); 0 = off")
+    ap.add_argument("--resume", action="store_true", help="keep the episode log and skip tasks already in it")
     args = ap.parse_args()
 
     from appworld import load_task_ids
@@ -102,13 +137,20 @@ def main() -> None:
     out_dir = ROOT / "experiments/results/appworld"
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / f"{exp}.episodes.jsonl"
-    if log_path.exists():
+    if log_path.exists() and not args.resume:
         log_path.unlink()
-    chunks = [ids[i:: args.workers] for i in range(args.workers)]
-    t0 = time.time()
+    done = {json.loads(l)["task_id"] for l in open(log_path)} if log_path.exists() else set()
+    todo = [t for t in ids if t not in done]
+    record = args.split in ("train", "dev")
+    chunks = [todo[i:: args.workers] for i in range(args.workers)]
+    t0 = clock.wall_time()
     with mp.get_context("spawn").Pool(args.workers) as pool:
-        pool.map(worker, [(c, args.config, exp, args.small, args.large, args.seed, str(log_path)) for c in chunks if c])
-    wall = time.time() - t0
+        pool.map(worker, [(c, args.config, exp, args.small, args.large, args.seed, str(log_path), args.context_limit,
+                           record) for c in chunks if c])
+    wall = clock.wall_time() - t0
+    eps = [json.loads(l) for l in open(log_path)] if log_path.exists() else []
+    attempted = [t for t in ids if t in {e["task_id"] for e in eps}]   # a deadline can leave tasks unattempted
+    recorded = {e["task_id"]: bool(e["success"]) for e in eps if isinstance(e.get("success"), bool)}
 
     from appworld.evaluator import evaluate_tasks
 
@@ -116,16 +158,25 @@ def main() -> None:
     # per-task details are kept for paired tests (McNemar / bootstrap) between configs.
     # Fail closed: a task whose end state was not saved (crashed worker) is scored as failed, not dropped.
     out_root = Path(os.environ.get("APPWORLD_ROOT", ".")) / "experiments/outputs" / exp / "tasks"
-    scorable = [t for t in ids if (out_root / t / "dbs").exists()]
-    missing = [t for t in ids if t not in scorable]
+    scorable = [t for t in attempted if (out_root / t / "dbs").exists()]
+    missing = [t for t in attempted if t not in scorable]
     report = evaluate_tasks(scorable, experiment_name=exp, include_details=True) if scorable else {"aggregate": {}, "individual": {}}
     for t in missing:
-        report.setdefault("individual", {})[t] = {"success": False, "missing_output": True, "failures": []}
-    if missing and scorable:
-        # Re-normalise the official task-level rate over all attempted tasks.
-        agg = report.setdefault("aggregate", {})
-        if "task_goal_completion" in agg:
-            agg["task_goal_completion"] = agg["task_goal_completion"] * len(scorable) / len(ids)
+        # No saved end state in this session: use the result recorded when the episode ran (a resumed run),
+        # otherwise fail closed.
+        report.setdefault("individual", {})[t] = {"success": recorded.get(t, False), "missing_output": True,
+                                                  "source": "episode_log" if t in recorded else "none", "failures": []}
+    if missing:
+        # Official aggregate covers the scorable tasks only; recompute both rates over every attempted task.
+        indiv = report["individual"]
+        scen: dict = {}
+        for t in attempted:
+            scen.setdefault(t.split("_")[0], []).append(bool(indiv.get(t, {}).get("success")))
+        report["aggregate_official_subset"] = report.get("aggregate", {})
+        report["aggregate"] = {        # percent, like AppWorld's own aggregate
+            "task_goal_completion": 100.0 * sum(bool(indiv.get(t, {}).get("success")) for t in attempted) / max(1, len(attempted)),
+            "scenario_goal_completion": 100.0 * sum(all(v) for v in scen.values()) / max(1, len(scen)),
+        }
     (out_dir / f"{exp}.evaluation.json").write_text(json.dumps(report, default=str))
     # Collateral damage: a failed test labelled "no_op_pass" passes when the agent
     # does nothing, so failing it means the agent changed something it should not have.
@@ -135,10 +186,11 @@ def main() -> None:
         sum(any(f.get("label") == "no_op_pass" for f in t.get("failures", [])) for t in indiv.values()) / max(1, len(indiv))
         if labelled or not indiv else None
     )
-    eps = [json.loads(l) for l in open(log_path)]
     ok = [e for e in eps if "error" not in e]
     summary = {
         "experiment": exp, "split": args.split, "config": args.config, "tasks": len(ids),
+        "tasksAttempted": len(attempted), "stoppedByDeadline": len(attempted) < len(ids),
+        "contextLimit": args.context_limit, "windowDropped": sum(e.get("window_dropped", 0) for e in ok),
         "official": report.get("aggregate", {}),
         "episodesFailed": len(eps) - len(ok),
         "missingOutputs": len(missing),
