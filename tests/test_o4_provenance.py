@@ -338,3 +338,25 @@ def test_o4_modes_and_runner_configs():
     assert cfg["o4_only"].o4_history and not (cfg["o4_only"].o1_retrieval or cfg["o4_only"].o3_consensus)
     assert cfg["o4_only"].o4_mode == "provenance" and cfg["o4_fidelity_only"].o4_mode == "fidelity"
     assert not cfg["no_o4"].o4_history
+
+
+def test_trace_records_each_components_decision():
+    w = ExecWorld()
+    guess = "apis.venmo.create_transaction(receiver_email='ana@venmo.com', amount=20)"
+    pay = "apis.venmo.create_transaction(receiver_email='ana@x.com', amount=20)"
+    agent, _ = _agent(w, [LOGIN, guess, SHOW, pay, "apis.supervisor.complete_task()"],
+                      AgentConfig(max_steps=8, trace=True))
+    trace = agent.run().trace
+    assert [t["outcome"] for t in trace] == ["executed", "denied", "executed", "executed", "executed"]
+    assert trace[0]["o3"] == "exempt" and trace[1]["g1"] == "R-AW-PROV"
+    assert trace[3]["o3"].startswith("certified") and trace[3]["g1"] == "allow"
+    assert trace[3]["o4_ledger_vars"] >= 4 and "venmo.login" not in trace[3]["o1_docs"]   # logged in: no login doc
+    assert set(trace[0]) >= {"arm", "risk", "o1_docs", "o4_recoverability", "tokens", "code", "output"}
+    assert not ACRSAppWorldAgent(ExecWorld(), *[RecordingClient([LOGIN])] * 2, AgentConfig(max_steps=1)).run().trace
+
+
+def test_runner_spreads_workers_over_model_replicas():
+    tier = _runner().tier
+    spec = "Qwen/Qwen3-8B-AWQ@http://localhost:8001/v1|http://localhost:8003/v1"
+    assert [tier(spec, "large", i).base_url for i in range(4)] == ["http://localhost:8001/v1", "http://localhost:8003/v1"] * 2
+    assert tier("m@http://x/v1", "small", 5).base_url == "http://x/v1"
