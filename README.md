@@ -29,7 +29,7 @@ Every objective has an `enabled` switch, and its disabled form is the SOTA analo
 ## Run
 
 ```bash
-python -m pytest -q tests          # 72 offline tests (fake AppWorld worlds; no GPU)
+python -m pytest -q tests          # 76 offline tests (fake AppWorld worlds; no GPU)
 ```
 
 On a GPU, open [`experiments/ACRS_appworld.ipynb`](experiments/ACRS_appworld.ipynb) in Colab (Pro) or Kaggle and choose Run all. It picks Qwen3-32B/14B/8B-AWQ by GPU memory, serves the models with vLLM, runs the `dev` pilot and ablations, and reports official TGC/SGC, collateral damage, cost, and McNemar/bootstrap tests.
