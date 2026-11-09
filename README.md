@@ -14,7 +14,7 @@ AppWorld's leaderboard top three reach 91–94 % task goal completion (TGC) on `
 | G1 | session-aware API retrieval from 457 APIs under a fixed context budget, for small models | **O1 SATR** |
 | G2 | per-step routing between model tiers by risk, with cost reported | **O2 APRR** |
 | G3 | guarantees on wrong or damaging state changes: outcome-level consensus (ARC-style execute-and-vote), certified thresholds, collateral damage, injection | **O3 MNCD + G1** |
-| G4 | fidelity-controlled pruning of 30–60-step trajectories | **O4 FCNP** |
+| G4 | context pruning that knows what the interpreter still holds: a printed value kept in a live variable need not stay in the prompt | **O4 provenance pruning** |
 | G5 | all of the above in one loop on free or Colab-Pro GPUs | integration |
 
 ## Objectives (registered titles kept; O3 widened)
@@ -22,14 +22,14 @@ AppWorld's leaderboard top three reach 91–94 % task goal completion (TGC) on `
 - **O1 Session-adaptive tool scoring:** `SessionApiRetriever`, using BM25 plus decayed app memory, auth completion and committed-API retention.
 - **O2 Risk-weighted policy routing:** `TierRouter`, a risk-signed contextual Thompson router between a small and a large open model.
 - **O3 Byzantine-tolerant mesh coordination → certified execution:** `OutcomeConsensus`. On state-changing steps it samples candidate programs, executes each from a saved world state, votes on the state changes they produce, and commits only a certified consensus; otherwise it abstains. It works with `AppWorldPolicy` (G1, policy as code: no unrequested deletion, scope) and the Learn-then-Test threshold in `paim.governance`.
-- **O4 PID-controlled provenance pruning:** `HistoryGovernor`, a PI-controlled compression of the episode history with a fidelity floor on tokens, ids and errors.
+- **O4 PID-controlled provenance pruning:** `ProvenanceGovernor` and `ProvenanceLedger` (`paim.appworld.provenance`). Turns older than the last three collapse into a one-line-per-step outline: a held output becomes a pointer to the live REPL variable that holds it, an error its message, and anything else is shortened by a PID controller that tracks the size of the baseline's window, so the extra information costs no extra context. A ledger of the agent's variables (type, keys, source API call; never string contents) is shown each step and shared with O1 (logged-in apps need no login docs), O2 (a lossy context is a risky step), O3 (trial runs leave no variables behind) and G1 (`R-AW-PROV`: an id or email written must have been observed). Design and hypotheses: [`docs/O4_PROVENANCE.md`](docs/O4_PROVENANCE.md). The first O4 (`HistoryGovernor`) remains as `o4_mode="fidelity"`.
 
 Every objective has an `enabled` switch, and its disabled form is the SOTA analogue. One agent therefore produces the baseline, the full system and every leave-one-out ablation.
 
 ## Run
 
 ```bash
-python -m pytest -q tests          # 48 offline tests (fake AppWorld world; no GPU)
+python -m pytest -q tests          # 72 offline tests (fake AppWorld worlds; no GPU)
 ```
 
 On a GPU, open [`experiments/ACRS_appworld.ipynb`](experiments/ACRS_appworld.ipynb) in Colab (Pro) or Kaggle and choose Run all. It picks Qwen3-32B/14B/8B-AWQ by GPU memory, serves the models with vLLM, runs the `dev` pilot and ablations, and reports official TGC/SGC, collateral damage, cost, and McNemar/bootstrap tests.
@@ -45,7 +45,7 @@ On a GPU, open [`experiments/ACRS_appworld.ipynb`](experiments/ACRS_appworld.ipy
   - router mix;
   - consensus certified/abstained counts;
   - policy denials;
-  - history fidelity.
+  - prompt tokens per task, history tokens and recoverability (O4), repeated reads and logins.
 - Candidate exploration uses AppWorld's `save_state`/`load_state`. Executions count toward the interaction budget and are disclosed in every result.
 
 ## Running on Kaggle

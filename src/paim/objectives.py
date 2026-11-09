@@ -118,9 +118,10 @@ RESEARCH_QUESTIONS: list[dict[str, str]] = [
     {
         "id": "RQ4",
         "question": (
-            "Can context compression be driven by a fidelity constraint instead of a chosen "
-            "ratio, such that the controller provably backs off when compression would break "
-            "a callable tool signature?"
+            "When a code-acting agent's tool results persist in interpreter variables, does pruning "
+            "observations by provenance (first dropping what a live variable still holds) reduce the "
+            "context the agent reads without lowering task completion, and do retrieval, routing, "
+            "verification and governance gain from the shared provenance?"
         ),
         "objective": "O4",
     },
@@ -372,74 +373,75 @@ OBJECTIVES: list[dict[str, Any]] = [
     {
         "id": "O4",
         "code": "FCNP",
-        "repo": "fcnp-context-pruning",
-        "module": "paim.o4_fcnp",
-        "title": "Fidelity-Controlled Neural Context Pruning for agentic context windows",
-        "short": "Compress as far as a fidelity floor allows, never far enough to break a call.",
+        "repo": "acrs-appworld",
+        "module": "paim.appworld.provenance",
+        "title": "PID-controlled provenance pruning of agent context",
+        "short": "Drop what the interpreter still holds; keep where it lives.",
         "statement": (
-            "To formulate agent context management as constrained online optimisation - minimise "
-            "retained tokens subject to a task-fidelity floor - and to realise it as a "
-            "closed-loop controller over typed context blocks whose fidelity measure gates "
-            "multiplicatively on tool-schema integrity, so that compression can never silently "
-            "break a callable tool signature."
+            "To design and evaluate a PID-controlled provenance-pruning controller for code-acting LLM agents "
+            "that replaces stale tool observations with where-provenance records of the interpreter state "
+            "(variable, source API call, structure) and a one-line outline of every earlier step, holds the "
+            "history at the size of the baseline's recent-turn window so that the extra information costs no extra "
+            "context, and shares its provenance store with retrieval (O1), routing (O2), consensus verification "
+            "(O3) and governance (G1)."
         ),
         "questions": ["RQ4"],
         "sota": [
             {
-                "work": "LLMLingua, LongLLMLingua",
-                "does": "Perplexity-driven token compression of free prose.",
-                "limitation": "Compresses to a ratio the engineer picks, and is unaware of which "
-                "spans are syntactically load-bearing for a tool call.",
+                "work": "LLMLingua (EMNLP 2023), LongLLMLingua (ACL 2024), LLMLingua-2 (Findings of ACL 2024)",
+                "does": "Token-level prompt compression, judged from the text itself.",
+                "limitation": "Cannot know that a printed value is still held by a program variable, so it "
+                "either keeps text the agent could recover or drops text it cannot.",
             },
             {
-                "work": "Selective-Context",
-                "does": "Filters tokens by self-information.",
-                "limitation": "Same family; a required parameter name that appears once is "
-                "exactly what an information criterion discards.",
+                "work": "SWE-agent history processor (NeurIPS 2024)",
+                "does": "Keeps the last few observations and collapses older ones.",
+                "limitation": "Content-blind: an old observation is dropped whether or not anything else still "
+                "holds it. The baseline's last-k window is this family.",
             },
             {
-                "work": "H2O, SnapKV, StreamingLLM",
-                "does": "Evicts KV-cache entries inside a forward pass.",
-                "limitation": "Operates inside the model, so it cannot govern the context an "
-                "orchestrator assembles from retrieval and observations.",
+                "work": "CodeAct (ICML 2024), AppWorld (ACL 2024)",
+                "does": "Code actions in a persistent interpreter, so tool results live in variables.",
+                "limitation": "The interpreter state is the agent's real memory, yet the prompt still carries the "
+                "raw observations and says nothing about what the session holds.",
             },
             {
-                "work": "RAG top-k truncation",
-                "does": "Keeps the k highest-scoring documents whole.",
-                "limitation": "Document-granular, so one verbose tool schema can evict the "
-                "entire session history.",
+                "work": "RECOMP (ICLR 2024)",
+                "does": "Compresses retrieved documents before the model reads them.",
+                "limitation": "Document compression for retrieval; no notion of interpreter state or of which "
+                "values a later state-changing call will need.",
             },
         ],
         "novelty": [
-            "The compression target is derived from a fidelity constraint rather than chosen by "
-            "hand - the controller answers 'how much can I compress this turn?'.",
-            "Pruning operates over typed blocks (signature, required parameter, observation, "
-            "session memory) rather than an undifferentiated token stream.",
-            "Schema integrity enters fidelity multiplicatively, so breaking a required parameter "
-            "drives fidelity towards zero and forces the controller to buy the tokens back.",
-            "PI control with anti-windup and a dead band, whose fixed point is the smallest "
-            "budget satisfying the floor.",
-            "Runs inside the session loop: surviving observations become the next turn's context "
-            "and feed O1's session memory, so compression decisions have downstream consequences.",
-            "The monotonicity premise underlying the fixed-point argument is verified "
-            "empirically rather than assumed.",
+            "Pruning by recoverability: an observation still held by an unchanged live variable is replaced by a "
+            "pointer to that variable at no loss of information (where-provenance, Buneman et al., ICDT 2001).",
+            "A ledger of the agent's variables (type, size, dict keys, never string contents) with the API call "
+            "and step that produced each, in place of raw observations.",
+            "PID control of the length kept from unrecoverable observations, tracking the context the baseline "
+            "window would use, with recoverability measured from the interpreter state rather than from the "
+            "pruner's own text matches.",
+            "One provenance store shared by the loop: O1 leaves out login docs for apps already authenticated, O2 "
+            "treats a lossy context as a risky step, O3 rolls back the variables of trial runs, and G1 blocks an "
+            "id or email that the agent has never been shown.",
         ],
         "method": [
-            "Fidelity = (0.55 x sub-goal term coverage + 0.45 x retained criticality mass) x "
-            "schema integrity, all computable from the retained blocks alone.",
-            "Value-density knapsack admission with a hard-keep set covering the query, the open "
-            "sub-goal, every committed tool signature and every required parameter.",
-            "PI controller on the keep-fraction with a squeeze term active only when fidelity "
-            "exceeds the floor by more than the margin.",
+            "Interpreter state read from AppWorld's REPL namespace; provenance from the AST of each committed "
+            "step (assignments, augmented assignments, loop targets, print dependencies).",
+            "An observation is recoverable when every name its print() calls read is a live variable still bound "
+            "to the object it had after that step and no print() calls an API directly.",
+            "Older turns collapse into a step outline: errors as their message, short outputs in full, held "
+            "outputs as pointers to their variables, the rest shortened to a length set by the PID controller.",
+            "Without an interpreter (ToolBench, KCC) the typed-block pruner in paim.o4_fcnp plays the same role.",
         ],
         "validation": [
-            "Compression achieved at equal fidelity, and floor-violation count, against "
-            "fixed-ratio, tail-truncation and no-pruning baselines.",
-            "Broken-signature count: the proposed controller must reach zero; fixed-ratio "
-            "compression is expected not to.",
-            "Empirical monotonicity check of fidelity against token budget.",
-            "Falsifier: if the controller violates the fidelity floor more often than the fixed-"
-            "ratio baseline at equal compression, the objective fails.",
+            "Primary: prompt tokens per task, paired over AppWorld dev tasks (Wilcoxon signed-rank), for the "
+            "baseline against the baseline plus O4 and for the full system against the full system without O4.",
+            "Offline (CPU) replay of recorded AppWorld trajectories: per-step history against the window and the "
+            "first O4, and recoverability.",
+            "Task goal completion must not fall (McNemar test, confidence interval of the difference).",
+            "Mechanism: error-step rate, context-limit drops, repeated read calls, logins and R-AW-PROV denials.",
+            "Falsifier: if O4 does not lower prompt tokens per task, or lowers task completion beyond the margin, "
+            "the objective fails.",
         ],
     },
     {

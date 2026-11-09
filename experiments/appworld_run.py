@@ -6,8 +6,10 @@ Example (after starting the vLLM servers, see experiments/ACRS_appworld.ipynb):
         --large Qwen/Qwen3-14B-AWQ@http://localhost:8001/v1 \
         --small Qwen/Qwen3-4B-AWQ@http://localhost:8002/v1
 
-Configs: baseline (ReAct-style, docs discovered by the agent), full, and the
-leave-one-out ablations no_o1 / no_o2 / no_o3 / no_o4 / no_g1.
+Configs: baseline (ReAct-style, docs discovered by the agent), full, the
+leave-one-out ablations no_o1 / no_o2 / no_o3 / no_o4 / no_g1, o4_only (the
+baseline plus O4, which isolates O4 cheaply), and the first O4 design
+(o4_fidelity_only, full_o4_fidelity) for comparison with the current one.
 Official TGC/SGC come from appworld.evaluator.evaluate_dataset; the per-episode
 log adds cost, router decisions, consensus counts, policy denials and fidelity.
 Rules followed: tune on train/dev only; test splits are run once per final config.
@@ -51,6 +53,9 @@ CONFIGS = {
     "no_o3": AgentConfig(o3_consensus=False),
     "no_o4": AgentConfig(o4_history=False),
     "no_g1": AgentConfig(g1_policy=False),
+    "o4_only": replace(AgentConfig.baseline(), o4_history=True, k_apis=0),
+    "o4_fidelity_only": replace(AgentConfig.baseline(), o4_history=True, o4_mode="fidelity", k_apis=0),
+    "full_o4_fidelity": AgentConfig(o4_mode="fidelity"),
 }
 
 
@@ -225,6 +230,14 @@ def main() -> None:
                        "exempt_steps")},
         "router": {k: sum(e["router"].get(k, 0) for e in ok) for k in ("small", "large")},
         "tokens": sum(e["usage"]["prompt_tokens"] + e["usage"]["completion_tokens"] for e in ok),
+        "promptTokens": sum(e["usage"]["prompt_tokens"] for e in ok),
+        # O4 (provenance pruning) and what it feeds: history size, pruning, repeated reads, logins, G1 R-AW-PROV.
+        "meanHistoryTokens": sum(e.get("history_tokens", 0.0) for e in ok) / max(1, len(ok)),
+        # old turns by how O4's last outline showed them (pointer to a variable, error, short, kept, cut)
+        "o4": {k: sum(e.get("o4", {}).get(k, 0) for e in ok) for k in ("held", "errors", "short", "kept", "cut")},
+        "refetchCalls": sum(e.get("refetch_calls", 0) for e in ok),
+        "loginCalls": sum(e.get("login_calls", 0) for e in ok),
+        "provDenials": sum(e.get("prov_denials", 0) for e in ok),
         "meanFidelity": sum(e["fidelity_mean"] for e in ok) / max(1, len(ok)),
         "wallSeconds": wall,
         "models": {"small": args.small.split("@")[0], "large": args.large.split("@")[0]},
