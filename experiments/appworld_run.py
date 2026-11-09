@@ -59,8 +59,12 @@ CONFIGS = {
 }
 
 
-def tier(spec: str, name: str) -> ModelTier:
-    model, url = spec.split("@", 1)
+def tier(spec: str, name: str, index: int = 0) -> ModelTier:
+    """``model@url``, or ``model@url1|url2|...`` for several replicas of the same model: worker ``index`` uses
+    replica ``index % n`` (both GPUs can serve the large model when no small tier is needed)."""
+    model, urls = spec.split("@", 1)
+    replicas = [u for u in urls.split("|") if u]
+    url = replicas[index % len(replicas)]
     extra = {"chat_template_kwargs": {"enable_thinking": False}} if "qwen3" in model.lower() else {}
     return ModelTier(name=model, base_url=url, tier=name, extra_body=extra)
 
@@ -95,12 +99,13 @@ def task_result(world) -> dict:
 
 
 def worker(args_tuple):
-    task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path, context_limit, record, demos = args_tuple
+    (task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path, context_limit, record, demos, index,
+     trace) = args_tuple
     from appworld import AppWorld
 
-    cfg = replace(CONFIGS[cfg_name], context_limit_tokens=context_limit)
-    small = ChatClient(tier(small_spec, "small"))
-    large = ChatClient(tier(large_spec, "large"))
+    cfg = replace(CONFIGS[cfg_name], context_limit_tokens=context_limit, trace=trace)
+    small = ChatClient(tier(small_spec, "small", index))
+    large = ChatClient(tier(large_spec, "large", index))
     rows = []
     for tid in task_ids:
         if deadline_reached():
@@ -142,6 +147,8 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true", help="keep the episode log and skip tasks already in it")
     ap.add_argument("--few-shot", type=int, default=0,
                     help="worked examples from the train split in every prompt (same for every config); 0 = none")
+    ap.add_argument("--trace", action="store_true",
+                    help="record each step's decisions (O1-O4, G1) in the episode log, for analysis and the dashboard")
     args = ap.parse_args()
 
     from appworld import load_task_ids
@@ -167,7 +174,7 @@ def main() -> None:
     t0 = clock.wall_time()
     with mp.get_context("spawn").Pool(args.workers) as pool:
         pool.map(worker, [(c, args.config, exp, args.small, args.large, args.seed, str(log_path), args.context_limit,
-                           record, demo_text) for c in chunks if c])
+                           record, demo_text, i, args.trace) for i, c in enumerate(chunks) if c])
     wall = clock.wall_time() - t0
     eps = [json.loads(l) for l in open(log_path)] if log_path.exists() else []
     attempted = [t for t in ids if t in {e["task_id"] for e in eps}]   # a deadline can leave tasks unattempted
