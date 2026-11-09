@@ -108,10 +108,14 @@ def main() -> None:
         summary["maxWindowTokens"] = max(r["max_window"] for r in ok)
         summary["maxProvenanceTokens"] = max(r["max_provenance"] for r in ok)
         summary["o4"] = {k: sum(r["o4"].get(k, 0) for r in ok) for k in ("held", "errors", "short", "kept", "cut")}
-        try:
+        a, b = [r["provenance"] for r in ok], [r["window"] for r in ok]
+        ra, rb = [r["recoverability"] for r in ok], [r["window_recoverability"] for r in ok]
+        summary["tasksWithFewerTokens"] = sum(x < y for x, y in zip(a, b))
+        summary["tasksWithHigherRecoverability"] = sum(x > y for x, y in zip(ra, rb))
+        try:   # paired over tasks, two-sided
             from scipy.stats import wilcoxon
-            a, b = [r["provenance"] for r in ok], [r["window"] for r in ok]
-            summary["wilcoxonProvenanceVsWindow"] = float(wilcoxon(a, b).pvalue) if any(x != y for x, y in zip(a, b)) else 1.0
+            summary["wilcoxonTokens"] = float(wilcoxon(a, b).pvalue) if a != b else 1.0
+            summary["wilcoxonRecoverability"] = float(wilcoxon(ra, rb).pvalue) if ra != rb else 1.0
         except ImportError:
             pass
     summary["errors"] = [r for r in rows if "error" in r][:5]
