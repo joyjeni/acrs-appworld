@@ -107,6 +107,51 @@ Run statistics: `promptTokens`, `meanHistoryTokens`, `o4` (pointers, condensed e
 (CPU only). It reports the per-step history each policy would show for those actions: the window, the first O4, and
 provenance pruning. This tests H4.4 before any GPU time is spent.
 
+## First evidence on AppWorld data: offline replay of the dev pilot (CPU, no model)
+
+**Setup.**
+- Data: the 20 recorded `baseline` trajectories of the November dev pilot (Qwen3-8B-AWQ, 725 steps), read from
+  AppWorld's own logs.
+- Replay: every step was executed again in fresh worlds; all 725 replayed outputs were identical to the recorded
+  ones.
+- Measured: at each step, the history each policy would have put in the next prompt for the same actions (tokens
+  estimated at four characters each).
+- Script: `experiments/replay_o4.py`, run on a Kaggle CPU notebook.
+
+| | baseline window (last 6 turns) | first O4 (`HistoryGovernor`) | provenance O4 |
+| --- | --- | --- | --- |
+| history tokens per step (mean) | 1,641 | 5,022 | 1,576 |
+| recoverability (mean over steps and tasks) | 0.46 | — | 0.90 |
+
+**Against the window.**
+- Recoverability is higher in 20 of 20 tasks (Wilcoxon signed-rank, two-sided, p = 1.9 × 10⁻⁶).
+- History per step is no larger: 4% smaller on average, smaller in 12 of 20 tasks, a difference that is not
+  significant (p = 0.37).
+- O4 therefore keeps about twice as much of the past usable at no extra context.
+
+**Against the first O4.**
+- 69% less history per step, smaller in 20 of 20 tasks (p = 1.9 × 10⁻⁶).
+- The first O4 used about three times the window's context. This explains part of the `full` configuration's 7.5M
+  tokens in the pilot.
+
+**Where the gain comes from in these trajectories.** At the last step, the 665 older turns of the 20 tasks broke down
+as follows:
+- 500 were errors (repeats of the same error are merged into one line);
+- 106 were outputs no variable held, shortened by the PID controller;
+- 40 were short outputs;
+- 18 were pointers to variables;
+- 1 was kept whole.
+
+The pilot's baseline solved no task, so its trajectories are mostly failing steps, and the pointer mechanism had
+little to point at. With the train-split worked examples (PR #2), more steps should succeed and store their results
+in variables. The GPU run will show whether that happens.
+
+**What the replay does not show.** The actions are fixed. The replay measures what each policy would show, not how
+the agent would act on it. H4.1 to H4.3 (tokens per task, task completion, wasted steps) need the GPU run of
+`o4_only` against `baseline` and `full` against `no_o4`. The setpoint ratio (0.9 times the window) and the merging of
+repeated lines were chosen after a first replay of these same dev trajectories. That is allowed, since dev may be
+used for tuning, but it is disclosed here.
+
 ## Threats to validity
 
 - **In-place mutation.** Rebinding is tracked, in-place mutation is not. If a variable is changed in place
