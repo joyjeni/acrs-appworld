@@ -172,6 +172,7 @@ class ConsensusResult:
     candidates: list[Candidate]
     share: float
     reason: str
+    all_failed: bool = False     # every candidate raised: candidates[0] (the greedy block) holds the error
 
 
 
@@ -201,7 +202,14 @@ class OutcomeConsensus:
     is 1 if it executed cleanly, 0 otherwise; the signature with the largest
     weighted share wins if it reaches theta with at least ``quorum`` supporters.
     Otherwise MNCD abstains, and the agent is told the candidates disagreed
-    (and the router escalates), instead of committing a guess.
+    (and the router escalates), instead of committing a guess. When every
+    candidate raised, the agent sees the greedy block's error, exactly what it
+    would have seen without O3, but with nothing committed.
+
+    ``exempt_apis`` are POST calls that change no task state worth voting on.
+    A login only issues an access token: voting on it ran every login four
+    times (three candidates plus the commit), and candidates that differed only
+    in how they spelled the credentials were counted as disagreeing.
     """
 
     catalog: ApiCatalog
@@ -209,10 +217,25 @@ class OutcomeConsensus:
     theta: float = 0.5
     quorum: int = 2
     enabled: bool = True
+    exempt_apis: tuple[str, ...] = ("login",)
     stats: Counter = field(default_factory=Counter)
 
+    def _exempt(self, key: str) -> bool:
+        return key.split(".", 1)[-1] in self.exempt_apis
+
+    def signature(self, code: str) -> tuple[str, ...]:
+        """State-changing calls of a block, without the exempt ones (what candidates vote on)."""
+        return tuple(s for s in call_signatures(code, self.catalog) if not self._exempt(s.split("(", 1)[0]))
+
     def needed(self, code: str) -> bool:
-        return self.enabled and bool(write_calls(code, self.catalog))
+        """True if the block makes a state-changing call that is not exempt (counts exempt-only steps)."""
+        if not self.enabled:
+            return False
+        writes = write_calls(code, self.catalog)
+        if writes and all(self._exempt(k) for k in writes):
+            self.stats["exempt_steps"] += 1
+            return False
+        return bool(writes)
 
     def run(
         self,
@@ -229,8 +252,7 @@ class OutcomeConsensus:
             out = world.execute(code)
             err = is_error(out)
             cands.append(
-                Candidate(code=code, output=out, error=err,
-                          signature=call_signatures(code, self.catalog),
+                Candidate(code=code, output=out, error=err, signature=self.signature(code),
                           weight=0.0 if err else 1.0)
             )
             restore_state(world, state_id)
@@ -245,7 +267,7 @@ class OutcomeConsensus:
         total = sum(c.weight for c in cands)
         if total == 0:
             self.stats["abstain_all_failed"] += 1
-            return ConsensusResult(False, None, cands, 0.0, "all candidates raised errors")
+            return ConsensusResult(False, None, cands, 0.0, "all candidates raised errors", all_failed=True)
         sig, w = max(groups.items(), key=lambda kv: kv[1])
         share = w / len(cands)
         if share >= self.theta and support[sig] >= min(self.quorum, len(cands)):

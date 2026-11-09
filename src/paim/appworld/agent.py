@@ -6,8 +6,10 @@ Per step:
   O2  route the step to the small or large model
       the model writes one Python code block
   G1  policy check on the state-changing calls in that block
-  O3  if the block changes state: sample alternatives, execute all from a saved
-      state, commit only a certified consensus; otherwise execute directly
+  O3  if the block changes state (a login does not count): sample alternatives,
+      execute all from a saved state, commit only a certified consensus;
+      otherwise execute directly. If every candidate raised, the agent sees the
+      error (nothing is committed)
       feedback: router reward, retriever memory, history
 The loop stops when the task is marked complete, at the step budget, or at the
 token ceiling (bounded agent loop).
@@ -135,8 +137,11 @@ class AppWorldPolicy:
 
 
 class ACRSAppWorldAgent:
-    def __init__(self, world: Any, small: ChatClient, large: ChatClient, config: AgentConfig, seed: int = 0):
+    def __init__(self, world: Any, small: ChatClient, large: ChatClient, config: AgentConfig, seed: int = 0,
+                 demos: str = ""):
+        """``demos``: worked examples for the system prompt (see paim.appworld.demos), the same for every config."""
         self.world = world
+        self.demos = demos.strip()
         self.task = world.task
         self.cfg = config
         self.clients = {"small": small, "large": large}
@@ -159,8 +164,10 @@ class ACRSAppWorldAgent:
         docs = iter_rendered(specs)
         history, fid = self.governor.compress(self.turns)
         self.fidelities.append(fid)
+        # The demos sit before the per-step API docs, so the prompt prefix stays the same across steps.
+        demos = f"\n{self.demos}\n" if self.demos else ""
         msgs = [
-            {"role": "system", "content": SYSTEM + "\nRelevant APIs:\n" + docs},
+            {"role": "system", "content": SYSTEM + demos + "\nRelevant APIs:\n" + docs},
             {"role": "user", "content": f"Supervisor: {sup_txt}\nTask: {self.task.instruction}\nApps available: {', '.join(self.task.allowed_apps)}"},
         ]
         for code, out in history:
@@ -194,6 +201,28 @@ class ACRSAppWorldAgent:
     def _total_tokens(self) -> int:
         return sum(c.usage.prompt_tokens + c.usage.completion_tokens for c in self.clients.values())
 
+    def _record_error(self, output: str) -> None:
+        self.log.errors += 1
+        if len(self.log.error_samples) < 15:
+            lines = [l.strip() for l in str(output).strip().splitlines() if l.strip()]
+            self.log.error_samples.append(lines[-1][:160] if lines else "")
+
+    @staticmethod
+    def _abstain_output(res: Any) -> str:
+        """What the agent sees when O3 does not commit the block."""
+        if res.all_failed and res.candidates:
+            others = len(res.candidates) - 1
+            alts = f", and so did {others} sampled alternative{'s' if others != 1 else ''}" if others else ""
+            # Same error the agent would see without O3; the trial run was rolled back.
+            return (f"{res.candidates[0].output}\n"
+                    f"[consensus] This block raised the error above{alts}. Nothing was committed: "
+                    "the world state is as it was before this step.")
+        summary = "; ".join(
+            f"cand{i}: {'error' if c.error else 'ok'} {list(c.signature)[:2]}" for i, c in enumerate(res.candidates)
+        )
+        return (f"[consensus] Not executed: {res.reason}. {summary}. Nothing was committed. "
+                "Re-check the required values with read-only calls, then try again.")
+
     # ------------------------------------------------------------------ loop
     def run(self) -> EpisodeLog:
         t0 = clock.perf_counter()
@@ -202,6 +231,7 @@ class ACRSAppWorldAgent:
             if self._total_tokens() > self.cfg.max_total_tokens:
                 self.log.stop_reason = "token ceiling"
                 break
+            self.log.steps = step + 1   # every model turn counts, including blocked and abstained ones
             msgs = self._messages()
             write_likely = any(s.writes for s in self.retriever.retrieve(self.task.instruction, "")[:3])
             ctx = TierRouter.context(last_error, write_likely, step)
@@ -235,11 +265,10 @@ class ACRSAppWorldAgent:
                     output = with_silence_hint(code, self.world.execute(code))
                 else:
                     # abstain: do not commit; tell the agent and escalate next step
-                    summary = "; ".join(
-                        f"cand{i}: {'error' if c.error else 'ok'} {list(c.signature)[:2]}" for i, c in enumerate(res.candidates)
-                    )
-                    output = (f"[consensus] Not executed: {res.reason}. {summary}. "
-                              "Re-check the required values with read-only calls, then try again.")
+                    output = self._abstain_output(res)
+                    if res.all_failed:   # handled like a failed step without O3, minus the side effects
+                        self._record_error(res.candidates[0].output)
+                        self.retriever.observe(code)
                     self.turns.append((code, output))
                     self.router.update(ctx, arm, False)
                     last_error = True
@@ -248,15 +277,12 @@ class ACRSAppWorldAgent:
                 output = with_silence_hint(code, self.world.execute(code))
 
             err = is_error(output)
-            self.log.errors += int(err)
-            if err and len(self.log.error_samples) < 15:
-                lines = [l.strip() for l in str(output).strip().splitlines() if l.strip()]
-                self.log.error_samples.append(lines[-1][:160] if lines else "")
+            if err:
+                self._record_error(output)
             self.router.update(ctx, arm, not err)
             self.retriever.observe(code)
             self.turns.append((code, output))
             last_error = err
-            self.log.steps = step + 1
             if self.world.task_completed():
                 self.log.completed = True
                 self.log.stop_reason = "completed"
