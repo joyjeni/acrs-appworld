@@ -2,7 +2,12 @@
 
 Per step:
   O1  retrieve the API docs for this step (session-aware)
-  O4  compress the episode history under a token budget with a fidelity floor
+  O4  provenance pruning: old observations whose values a live REPL variable still
+      holds are replaced by a pointer to that variable; a ledger of the agent's
+      variables (type, keys, source API call) is shown; a PID controller holds the
+      history at a token budget. The ledger also feeds O1 (logged-in apps), O2
+      (lossy-context risk), O3 (trial runs leave no variables) and G1 (ids and
+      emails written must have been observed)
   O2  route the step to the small or large model
       the model writes one Python code block
   G1  policy check on the state-changing calls in that block
@@ -31,6 +36,7 @@ from paim.appworld.objectives import (
     SessionApiRetriever,
     TierRouter,
 )
+from paim.appworld.provenance import InterpreterState, ProvenanceGovernor, ProvenanceLedger, TurnMeta
 
 SYSTEM = """You are an autonomous assistant completing a day-to-day task for your supervisor by writing Python code that calls app APIs in a REPL.
 
@@ -69,6 +75,11 @@ class AgentConfig:
     sample_temperature: float = 0.7
     max_tokens_step: int = 768
     budget_tokens: int = 6000
+    # O4 variant: "provenance" (current: PID-controlled provenance pruning) or "fidelity" (the first O4,
+    # HistoryGovernor), kept so the two designs can be compared.
+    o4_mode: str = "provenance"
+    o4_budget_tokens: int = 4000   # cap on the provenance governor's setpoint (it also tracks the baseline window)
+    trace: bool = False            # record each step's decisions in EpisodeLog.trace (analysis and the dashboard)
     # Hard prompt limit shared by every config (the server's max model length minus the reply). 0 = off.
     # Without it a long episode overflows the server's context and the whole episode fails on an HTTP 400,
     # which would count against whichever config keeps more history.
@@ -99,6 +110,12 @@ class EpisodeLog:
     seconds: float = 0.0
     window_dropped: int = 0      # history turns dropped to respect context_limit_tokens
     success: bool | None = None  # AppWorld's own per-task test result (train/dev), recorded by the runner
+    history_tokens: float = 0.0  # mean estimated tokens of history (and O4's variable ledger) per step
+    o4: dict[str, int] = field(default_factory=dict)   # what O4 pruned (provenance mode)
+    refetch_calls: int = 0       # read calls repeated with the same call text in a later committed step
+    login_calls: int = 0         # login calls in committed steps
+    prov_denials: int = 0        # G1 R-AW-PROV denials (an id or email that was never observed)
+    trace: list[dict[str, Any]] = field(default_factory=list)   # per-step decisions when AgentConfig.trace
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -109,6 +126,8 @@ class AppWorldPolicy:
 
     R-AW-DEL  a DELETE-type call is allowed only if the task asks to delete/remove
     R-AW-SCOPE  writes only to apps the task allows (AppWorld's own scope)
+    R-AW-PROV  an id, email or phone number written as a literal by a state-changing call must appear in the
+               task or in something the agent was shown (O4's provenance ledger; only when O4 is on)
     Denied blocks are not executed; the agent is told why (approve-before-execute).
     """
 
@@ -120,14 +139,21 @@ class AppWorldPolicy:
         self.allowed = set(allowed_apps) | {"supervisor", "api_docs"}
         self.decisions: list[dict[str, Any]] = []
 
-    def check(self, code: str) -> tuple[bool, str]:
-        for key in write_calls(code, self.catalog):
+    def check(self, code: str, ledger: ProvenanceLedger | None = None) -> tuple[bool, str]:
+        writes = write_calls(code, self.catalog)
+        for key in writes:
             spec = self.catalog.get(key)
             app = key.split(".")[0]
             if app not in self.allowed:
                 return self._deny("R-AW-SCOPE", f"{key}: app not allowed for this task")
             if spec is not None and spec.deletes and not self.DELETE_WORDS.search(self.instruction):
                 return self._deny("R-AW-DEL", f"{key}: deletion not requested by the supervisor")
+        if ledger is not None and writes:
+            unseen = ledger.unobserved(code, set(writes))
+            if unseen:
+                key, param, value = unseen[0]
+                return self._deny("R-AW-PROV", f"{key}: {param}={value!r} does not appear in the task or in any "
+                                               "output so far, so it looks guessed; look the value up first")
         self.decisions.append({"allow": True})
         return True, ""
 
@@ -149,30 +175,61 @@ class ACRSAppWorldAgent:
         self.retriever = SessionApiRetriever(self.catalog, k=config.k_apis, enabled=config.o1_retrieval)
         self.router = TierRouter(enabled=config.o2_routing, seed=seed)
         self.consensus = OutcomeConsensus(self.catalog, n=config.consensus_n, enabled=config.o3_consensus)
-        self.governor = HistoryGovernor(budget_tokens=config.budget_tokens, enabled=config.o4_history)
+        self.state = InterpreterState(world)   # the agent's REPL variables (O3 rolls trial bindings back)
+        self.ledger: ProvenanceLedger | None = None
+        if config.o4_history and config.o4_mode == "provenance":
+            self.ledger = ProvenanceLedger(self.state, f"{self.task.instruction}\n{self._supervisor_text()}")
+            self.governor: ProvenanceGovernor | HistoryGovernor = ProvenanceGovernor(budget_tokens=config.o4_budget_tokens)
+        else:
+            self.governor = HistoryGovernor(budget_tokens=config.budget_tokens, enabled=config.o4_history)
         self.policy = AppWorldPolicy(self.catalog, self.task.instruction, list(self.task.allowed_apps)) if config.g1_policy else None
         self.turns: list[tuple[str, str]] = []
+        self.metas: list[TurnMeta] = []
         self.fidelities: list[float] = []
+        self._lossy = False
+        self._history_tokens: list[int] = []
+        self._reads_seen: set[str] = set()
+        self._step_view: dict[str, Any] = {}   # what O1 and O4 did for the current step (for the trace)
         self.log = EpisodeLog(task_id=str(getattr(self.task, "id", "")))
+
+    def _supervisor_text(self) -> str:
+        sup = self.task.supervisor
+        return (f"{getattr(sup, 'first_name', '')} {getattr(sup, 'last_name', '')}, email {getattr(sup, 'email', '')}, "
+                f"phone {getattr(sup, 'phone_number', '')}")
 
     # ------------------------------------------------------------------ prompt
     def _messages(self) -> list[dict[str, str]]:
-        sup = self.task.supervisor
-        sup_txt = f"{getattr(sup, 'first_name', '')} {getattr(sup, 'last_name', '')}, email {getattr(sup, 'email', '')}, phone {getattr(sup, 'phone_number', '')}"
         recent = " ".join(c for c, _ in self.turns[-2:])
-        specs = self.retriever.retrieve(self.task.instruction, recent)
+        authenticated = self.ledger.authenticated_apps() if self.ledger is not None else frozenset()
+        specs = self.retriever.retrieve(self.task.instruction, recent, authenticated=authenticated)
         docs = iter_rendered(specs)
-        history, fid = self.governor.compress(self.turns)
+        ledger_text = summary = ""
+        if isinstance(self.governor, ProvenanceGovernor) and self.ledger is not None:
+            history, fid, self._lossy, summary = self.governor.compress(self.turns, self.metas, self.ledger)
+            ledger_text = self.ledger.render()
+        else:
+            history, fid = self.governor.compress(self.turns)
         self.fidelities.append(fid)
         # The demos sit before the per-step API docs, so the prompt prefix stays the same across steps.
         demos = f"\n{self.demos}\n" if self.demos else ""
         msgs = [
             {"role": "system", "content": SYSTEM + demos + "\nRelevant APIs:\n" + docs},
-            {"role": "user", "content": f"Supervisor: {sup_txt}\nTask: {self.task.instruction}\nApps available: {', '.join(self.task.allowed_apps)}"},
+            {"role": "user", "content": f"Supervisor: {self._supervisor_text()}\nTask: {self.task.instruction}\n"
+                                        f"Apps available: {', '.join(self.task.allowed_apps)}"
+                                        + (f"\n\n{summary}" if summary else "")},
         ]
         for code, out in history:
             msgs.append({"role": "assistant", "content": f"```python\n{code}\n```"})
             msgs.append({"role": "user", "content": f"Output:\n{out[:6000]}"})
+        if ledger_text:   # after the latest output: the current state of the session
+            msgs[-1] = {"role": "user", "content": msgs[-1]["content"] + "\n\n" + ledger_text}
+        self._history_tokens.append((sum(len(m["content"]) for m in msgs[2:]) + len(summary)) // 4)
+        self._step_view = {
+            "o1_docs": [sp.key for sp in specs], "o1_login_skipped": sorted(authenticated),
+            "o4_recoverability": round(fid, 3), "o4_lossy": self._lossy, "o4_history_tokens": self._history_tokens[-1],
+            "o4_outline_lines": sum(1 for ln in summary.splitlines() if ln.startswith("[")),
+            "o4_ledger_vars": len(self.state.names()) if self.ledger is not None else 0,
+        }
         return self._fit_limit(msgs)
 
     def _fit_limit(self, msgs: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -200,6 +257,44 @@ class ACRSAppWorldAgent:
 
     def _total_tokens(self) -> int:
         return sum(c.usage.prompt_tokens + c.usage.completion_tokens for c in self.clients.values())
+
+    _CALL = re.compile(r"\bapis\.([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)")
+
+    def _count_calls(self, code: str) -> None:
+        """Logins, and read calls repeated with the same call text (a text-level proxy for re-fetching)."""
+        for m in self._CALL.finditer(code or ""):
+            key = f"{m.group(1)}.{m.group(2)}"
+            if m.group(2) == "login":
+                self.log.login_calls += 1
+            spec = self.catalog.get(key)
+            if m.group(1) != "api_docs" and (spec is None or spec.writes):
+                continue
+            args = re.sub(r"\s+", "", m.group(3))
+            sig = f"{key}({args})"
+            if sig in self._reads_seen:
+                self.log.refetch_calls += 1
+            self._reads_seen.add(sig)
+
+    def _trace(self, step: int, ctx: tuple, arm: str, tokens_before: int, outcome: str, code: str, output: str,
+               g1: str, o3: str) -> None:
+        if not self.cfg.trace:
+            return
+        self.log.trace.append({
+            "step": step + 1, "arm": arm,
+            "risk": {"recent_error": ctx[0], "write_likely": ctx[1], "late": ctx[2], "lossy": ctx[3] if len(ctx) > 3 else False},
+            **self._step_view, "g1": g1, "o3": o3, "outcome": outcome, "error": is_error(output),
+            "tokens": self._total_tokens() - tokens_before, "code": code[:400], "output": str(output)[:400],
+        })
+
+    def _add_turn(self, code: str, output: str, meta: TurnMeta) -> None:
+        self.turns.append((code, output))
+        self.metas.append(meta)
+
+    def _deny(self, step: int, code: str, why: str) -> None:
+        self.log.policy_denials += 1
+        if "R-AW-PROV" in why:
+            self.log.prov_denials += 1
+        self._add_turn(code, why, TurnMeta(step=step, kind="denied", error=True))
 
     def _record_error(self, output: str) -> None:
         self.log.errors += 1
@@ -232,26 +327,33 @@ class ACRSAppWorldAgent:
                 self.log.stop_reason = "token ceiling"
                 break
             self.log.steps = step + 1   # every model turn counts, including blocked and abstained ones
+            tokens_before = self._total_tokens()
             msgs = self._messages()
             write_likely = any(s.writes for s in self.retriever.retrieve(self.task.instruction, "")[:3])
-            ctx = TierRouter.context(last_error, write_likely, step)
+            ctx = TierRouter.context(last_error, write_likely, step, lossy=self._lossy)
             arm = self.router.choose(ctx)
             client = self.clients[arm]
             text = client.complete(msgs, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens_step)[0]
             code = show_last_expression(extract_code(text))
 
             # G1: policy before any execution
+            g1 = "off"
             if self.policy is not None:
-                ok, why = self.policy.check(code)
+                ok, why = self.policy.check(code, self.ledger)
+                g1 = "allow" if ok else self.policy.decisions[-1].get("rule", "deny")
                 if not ok:
-                    self.log.policy_denials += 1
-                    self.turns.append((code, why))
+                    self._deny(step, code, why)
                     self.router.update(ctx, arm, False)
                     last_error = True
+                    self._trace(step, ctx, arm, tokens_before, "denied", code, why, g1, "-")
                     continue
 
             # O3: consensus on state-changing steps
-            if self.consensus.needed(code):
+            exempt_before = self.consensus.stats.get("exempt_steps", 0)
+            needed = self.consensus.needed(code)
+            o3 = "off" if not self.consensus.enabled else (
+                "exempt" if self.consensus.stats.get("exempt_steps", 0) > exempt_before else "not needed")
+            if needed:
                 def sample(k: int, msgs=msgs, client=client) -> list[str]:
                     if k <= 0:
                         return []
@@ -259,8 +361,20 @@ class ACRSAppWorldAgent:
                                            max_tokens=self.cfg.max_tokens_step, n=k)
                     return [show_last_expression(extract_code(o)) for o in outs]
 
-                res = self.consensus.run(self.world, code, sample, step)
+                res = self.consensus.run(self.world, code, sample, step, state=self.state)
+                o3 = f"certified {res.reason}" if res.certified else (
+                    "abstained: every candidate raised" if res.all_failed else "abstained: candidates disagree")
                 if res.certified and res.winner is not None:
+                    if res.winner.code != code and self.policy is not None:
+                        # G1 approved the greedy block; the block O3 commits must pass G1 too.
+                        ok, why = self.policy.check(res.winner.code, self.ledger)
+                        if not ok:
+                            self._deny(step, res.winner.code, why)
+                            self.router.update(ctx, arm, False)
+                            last_error = True
+                            g1 = self.policy.decisions[-1].get("rule", "deny")
+                            self._trace(step, ctx, arm, tokens_before, "denied", res.winner.code, why, g1, o3)
+                            continue
                     code = res.winner.code
                     output = with_silence_hint(code, self.world.execute(code))
                 else:
@@ -269,9 +383,12 @@ class ACRSAppWorldAgent:
                     if res.all_failed:   # handled like a failed step without O3, minus the side effects
                         self._record_error(res.candidates[0].output)
                         self.retriever.observe(code)
-                    self.turns.append((code, output))
+                        if self.ledger is not None:
+                            self.ledger.observe(res.candidates[0].output)
+                    self._add_turn(code, output, TurnMeta(step=step, kind="abstained", error=True))
                     self.router.update(ctx, arm, False)
                     last_error = True
+                    self._trace(step, ctx, arm, tokens_before, "abstained", code, output, g1, o3)
                     continue
             else:
                 output = with_silence_hint(code, self.world.execute(code))
@@ -281,8 +398,11 @@ class ACRSAppWorldAgent:
                 self._record_error(output)
             self.router.update(ctx, arm, not err)
             self.retriever.observe(code)
-            self.turns.append((code, output))
+            self._count_calls(code)
+            meta = self.ledger.record(step, code, output, err) if self.ledger is not None else TurnMeta(step, error=err)
+            self._add_turn(code, output, meta)
             last_error = err
+            self._trace(step, ctx, arm, tokens_before, "executed", code, output, g1, o3)
             if self.world.task_completed():
                 self.log.completed = True
                 self.log.stop_reason = "completed"
@@ -292,6 +412,9 @@ class ACRSAppWorldAgent:
         self.log.consensus = dict(self.consensus.stats)
         self.log.router = dict(self.router.decisions)
         self.log.fidelity_mean = sum(self.fidelities) / len(self.fidelities) if self.fidelities else 1.0
+        self.log.history_tokens = sum(self._history_tokens) / len(self._history_tokens) if self._history_tokens else 0.0
+        if isinstance(self.governor, ProvenanceGovernor):
+            self.log.o4 = dict(self.governor.stats)
         u = Usage()
         for c in self.clients.values():
             u.add(c.usage)

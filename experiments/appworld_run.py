@@ -6,8 +6,10 @@ Example (after starting the vLLM servers, see experiments/ACRS_appworld.ipynb):
         --large Qwen/Qwen3-14B-AWQ@http://localhost:8001/v1 \
         --small Qwen/Qwen3-4B-AWQ@http://localhost:8002/v1
 
-Configs: baseline (ReAct-style, docs discovered by the agent), full, and the
-leave-one-out ablations no_o1 / no_o2 / no_o3 / no_o4 / no_g1.
+Configs: baseline (ReAct-style, docs discovered by the agent), full, the
+leave-one-out ablations no_o1 / no_o2 / no_o3 / no_o4 / no_g1, o4_only (the
+baseline plus O4, which isolates O4 cheaply), and the first O4 design
+(o4_fidelity_only, full_o4_fidelity) for comparison with the current one.
 Official TGC/SGC come from appworld.evaluator.evaluate_dataset; the per-episode
 log adds cost, router decisions, consensus counts, policy denials and fidelity.
 Rules followed: tune on train/dev only; test splits are run once per final config.
@@ -51,11 +53,18 @@ CONFIGS = {
     "no_o3": AgentConfig(o3_consensus=False),
     "no_o4": AgentConfig(o4_history=False),
     "no_g1": AgentConfig(g1_policy=False),
+    "o4_only": replace(AgentConfig.baseline(), o4_history=True, k_apis=0),
+    "o4_fidelity_only": replace(AgentConfig.baseline(), o4_history=True, o4_mode="fidelity", k_apis=0),
+    "full_o4_fidelity": AgentConfig(o4_mode="fidelity"),
 }
 
 
-def tier(spec: str, name: str) -> ModelTier:
-    model, url = spec.split("@", 1)
+def tier(spec: str, name: str, index: int = 0) -> ModelTier:
+    """``model@url``, or ``model@url1|url2|...`` for several replicas of the same model: worker ``index`` uses
+    replica ``index % n`` (both GPUs can serve the large model when no small tier is needed)."""
+    model, urls = spec.split("@", 1)
+    replicas = [u for u in urls.split("|") if u]
+    url = replicas[index % len(replicas)]
     extra = {"chat_template_kwargs": {"enable_thinking": False}} if "qwen3" in model.lower() else {}
     return ModelTier(name=model, base_url=url, tier=name, extra_body=extra)
 
@@ -90,12 +99,13 @@ def task_result(world) -> dict:
 
 
 def worker(args_tuple):
-    task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path, context_limit, record, demos = args_tuple
+    (task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path, context_limit, record, demos, index,
+     trace) = args_tuple
     from appworld import AppWorld
 
-    cfg = replace(CONFIGS[cfg_name], context_limit_tokens=context_limit)
-    small = ChatClient(tier(small_spec, "small"))
-    large = ChatClient(tier(large_spec, "large"))
+    cfg = replace(CONFIGS[cfg_name], context_limit_tokens=context_limit, trace=trace)
+    small = ChatClient(tier(small_spec, "small", index))
+    large = ChatClient(tier(large_spec, "large", index))
     rows = []
     for tid in task_ids:
         if deadline_reached():
@@ -137,6 +147,8 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true", help="keep the episode log and skip tasks already in it")
     ap.add_argument("--few-shot", type=int, default=0,
                     help="worked examples from the train split in every prompt (same for every config); 0 = none")
+    ap.add_argument("--trace", action="store_true",
+                    help="record each step's decisions (O1-O4, G1) in the episode log, for analysis and the dashboard")
     args = ap.parse_args()
 
     from appworld import load_task_ids
@@ -162,7 +174,7 @@ def main() -> None:
     t0 = clock.wall_time()
     with mp.get_context("spawn").Pool(args.workers) as pool:
         pool.map(worker, [(c, args.config, exp, args.small, args.large, args.seed, str(log_path), args.context_limit,
-                           record, demo_text) for c in chunks if c])
+                           record, demo_text, i, args.trace) for i, c in enumerate(chunks) if c])
     wall = clock.wall_time() - t0
     eps = [json.loads(l) for l in open(log_path)] if log_path.exists() else []
     attempted = [t for t in ids if t in {e["task_id"] for e in eps}]   # a deadline can leave tasks unattempted
@@ -225,6 +237,14 @@ def main() -> None:
                        "exempt_steps")},
         "router": {k: sum(e["router"].get(k, 0) for e in ok) for k in ("small", "large")},
         "tokens": sum(e["usage"]["prompt_tokens"] + e["usage"]["completion_tokens"] for e in ok),
+        "promptTokens": sum(e["usage"]["prompt_tokens"] for e in ok),
+        # O4 (provenance pruning) and what it feeds: history size, pruning, repeated reads, logins, G1 R-AW-PROV.
+        "meanHistoryTokens": sum(e.get("history_tokens", 0.0) for e in ok) / max(1, len(ok)),
+        # old turns by how O4's last outline showed them (pointer to a variable, error, short, kept, cut)
+        "o4": {k: sum(e.get("o4", {}).get(k, 0) for e in ok) for k in ("held", "errors", "short", "kept", "cut")},
+        "refetchCalls": sum(e.get("refetch_calls", 0) for e in ok),
+        "loginCalls": sum(e.get("login_calls", 0) for e in ok),
+        "provDenials": sum(e.get("prov_denials", 0) for e in ok),
         "meanFidelity": sum(e["fidelity_mean"] for e in ok) / max(1, len(ok)),
         "wallSeconds": wall,
         "models": {"small": args.small.split("@")[0], "large": args.large.split("@")[0]},

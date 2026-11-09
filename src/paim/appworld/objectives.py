@@ -5,8 +5,9 @@ O2  TierRouter              which model tier writes each step
 O3  OutcomeConsensus        ARC-style: execute several candidate programs from a
                             saved world state, vote on their *outcomes*, commit
                             only a certified one
-O4  HistoryGovernor         keep the episode history inside a token budget while
-                            holding a fidelity floor on the facts the agent needs
+O4  HistoryGovernor         the first O4 (kept as o4_mode="fidelity"): keep the history
+                            inside a token budget with a floor on regex-matched facts.
+                            The current O4 is provenance.ProvenanceGovernor.
 
 Each class has an ``enabled`` switch; disabled means its SOTA analogue
 (static retrieval, always-large model, single greedy execution, recency
@@ -66,7 +67,10 @@ class SessionApiRetriever:
                 self._committed.append(key)
         self._committed = self._committed[-12:]
 
-    def retrieve(self, instruction: str, recent: str = "") -> list[ApiSpec]:
+    def retrieve(self, instruction: str, recent: str = "", authenticated: frozenset[str] | set[str] = frozenset()
+                 ) -> list[ApiSpec]:
+        """Top-k API docs for this step. ``authenticated``: apps whose access token the session already holds
+        (from O4's provenance ledger); their login docs are not added."""
         assert self._bm25 is not None
         if not self.enabled:
             if not self._static:
@@ -83,17 +87,20 @@ class SessionApiRetriever:
             s = c.score / top + self.app_weight * math.tanh(self._app_mem.get(spec.app, 0.0))
             scored.append((s, c.doc_id))
         scored.sort(reverse=True)
+        def logged_in(key: str) -> bool:   # an app whose token the session holds needs no login doc
+            return key.endswith(".login") and key.split(".")[0] in authenticated
+
         chosen: list[str] = []
         for key in self._committed[-4:]:
-            if key not in chosen:
+            if key not in chosen and not logged_in(key):
                 chosen.append(key)
         for _, d in scored:
             if len(chosen) >= self.k:
                 break
-            if d not in chosen:
+            if d not in chosen and not logged_in(d):
                 chosen.append(d)
-        # auth completion
-        for app in {self.catalog[d].app for d in chosen}:
+        # auth completion (not for apps already logged in: their token is in a live variable)
+        for app in {self.catalog[d].app for d in chosen} - set(authenticated):
             login = f"{app}.login"
             if login in self.catalog.specs and login not in chosen:
                 chosen.append(login)
@@ -107,10 +114,11 @@ class SessionApiRetriever:
 class TierRouter:
     """Risk-signed two-arm Thompson router (small vs large model) per context.
 
-    Context = (recent error?, write-likely step?, late in episode?). Reward is
-    1 for an error-free, policy-allowed step, minus a cost penalty for the large
-    tier. High-risk contexts (recent error or write-likely) are biased to the
-    large tier until the small tier has proven itself there: this is the
+    Context = (recent error?, write-likely step?, late in episode?, lossy context?).
+    Reward is 1 for an error-free, policy-allowed step, minus a cost penalty for
+    the large tier. High-risk contexts (recent error, write-likely, or a context
+    from which O4 had to cut information no variable still holds) are biased to
+    the large tier until the small tier has proven itself there: this is the
     risk-signed part. The SOTA analogue always uses the large model.
     """
 
@@ -126,8 +134,8 @@ class TierRouter:
         self._rng.seed(self.seed)
 
     @staticmethod
-    def context(last_error: bool, write_likely: bool, step: int) -> tuple:
-        return (bool(last_error), bool(write_likely), step >= 15)
+    def context(last_error: bool, write_likely: bool, step: int, lossy: bool = False) -> tuple:
+        return (bool(last_error), bool(write_likely), step >= 15, bool(lossy))
 
     def choose(self, ctx: tuple) -> str:
         if not self.enabled:
@@ -136,7 +144,7 @@ class TierRouter:
         a_s, b_s, a_l, b_l = self._ab[ctx]
         small = self._rng.betavariate(a_s, b_s)
         large = self._rng.betavariate(a_l, b_l) - self.cost_penalty
-        if ctx[0] or ctx[1]:
+        if ctx[0] or ctx[1] or (len(ctx) > 3 and ctx[3]):
             # Risk sign: on risky steps the small tier must beat the large one by
             # more than the cost saving before it is trusted.
             small -= self.risk_margin
@@ -243,10 +251,14 @@ class OutcomeConsensus:
         first: str,
         sample: Callable[[int], list[str]],
         step: int,
+        state: Any = None,
     ) -> ConsensusResult:
+        """``state``: the agent's interpreter variables (``provenance.InterpreterState``). AppWorld restores the app
+        databases but not the Python namespace, so each trial's variables are rolled back here too."""
         codes = [first] + [c for c in sample(self.n - 1) if c.strip()]
         state_id = f"acrs_s{step}"
         world.save_state(state_id)
+        snap = state.snapshot() if state is not None else None
         cands: list[Candidate] = []
         for code in codes:
             out = world.execute(code)
@@ -256,6 +268,8 @@ class OutcomeConsensus:
                           weight=0.0 if err else 1.0)
             )
             restore_state(world, state_id)
+            if state is not None:
+                state.restore(snap)
         self.stats["consensus_steps"] += 1
         self.stats["candidate_executions"] += len(cands)
         groups: dict[tuple, float] = defaultdict(float)

@@ -5,7 +5,7 @@ Four objectives, one closed loop:
 * **O1 SASR** - Session-Aware Sequential Tool Retrieval and Reranking
 * **O2 APRR** - Adaptive Priority and Risk-aware Routing
 * **O3 MNCD** - Mesh-Networked Consensus and Deliberation
-* **O4 FCNP** - Fidelity-Controlled Neural Context Pruning
+* **O4 FCNP** - PID-controlled provenance pruning (AppWorld: ``paim.appworld.provenance``; text-only tools: fidelity-controlled typed-block pruning)
 
 See :mod:`paim.objectives` for the objective statements and
 :mod:`paim.pipeline` for how the four are composed.
