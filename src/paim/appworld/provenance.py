@@ -385,33 +385,41 @@ class ProvenanceLedger:
 
 @dataclass
 class ProvenanceGovernor:
-    """Collapses old turns into one line each, pointing to the variables that hold their values.
+    """Collapses old turns into an outline that points to the variables holding their values.
 
-    The last ``keep_last`` turns stay verbatim. Every older turn becomes a line of the step summary: what it called,
-    then its result. The result is the variables that still hold its output (nothing is lost, the ledger says what
-    they contain), its error message, a short output in full, or an output no variable holds cut to ``_chars``
-    characters. A PID controller sets ``_chars`` so that the history (summary, recent turns and ledger) tracks a
-    setpoint: ``budget_tokens``, or, with ``match_window``, the size of the baseline's last-six-turns window at this
-    step if that is smaller. O4 then costs no more context than the baseline and spends what it saves (pointers
-    instead of repeated listings) on keeping more of the past recoverable. Recoverability, the share of past
-    non-trivial observations still visible or held by a live variable, is measured at every step.
+    The last ``keep_last`` turns stay verbatim. Every older turn becomes a line of a step outline: what it called, then
+    its result. In order of preference the result is:
+
+    - its error message;
+    - a short output in full;
+    - the variables that still hold its output (nothing is lost: the ledger says what they contain);
+    - an output no variable holds, cut to ``_chars`` characters.
+
+    Consecutive steps with the same line are merged (``[5-9] ... (5 times)``), which also tells the agent that it
+    repeated itself. A PID controller sets ``_chars`` so that the history (outline, recent turns and ledger) tracks a
+    setpoint: ``budget_tokens``, or with ``match_window``, ``window_ratio`` times the size the baseline's six-turn
+    window would have at this step, if that is smaller. O4 then costs less context than the baseline and spends it on
+    keeping the past recoverable. Recoverability, the share of past non-trivial observations still visible or held by
+    a live variable, is measured at every step.
     """
 
     budget_tokens: int = 4000
     match_window: bool = True
+    window_ratio: float = 0.9
     window_turns: int = 6
     keep_last: int = 3
     kp: float = 0.6
     ki: float = 0.2
     kd: float = 0.1
-    inline_chars: int = 120        # outputs this short appear in full in the summary
+    inline_chars: int = 120        # outputs this short appear in full in the outline
     min_chars: int = 80
     max_chars: int = 2000
     _chars: int = 400
     _integral: float = 0.0
     _last_err: float = 0.0
-    stats: dict[str, int] = field(default_factory=lambda: {"pruned_held": 0, "condensed_errors": 0,
-                                                          "cut_unheld": 0, "steps": 0})
+    # Old turns by how the latest outline shows them (distinct turns, not cumulative), and the number of steps.
+    stats: dict[str, int] = field(default_factory=lambda: {"held": 0, "errors": 0, "short": 0, "cut": 0,
+                                                          "kept": 0, "steps": 0})
     log: list[dict[str, float]] = field(default_factory=list)
 
     @staticmethod
@@ -422,9 +430,9 @@ class ProvenanceGovernor:
     def _error_message(output: str) -> str:
         found = _ERROR_LINE.findall(output or "")
         if found:
-            return found[-1][:200]
+            return found[-1][:160]
         lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
-        return lines[-1][:200] if lines else ""
+        return lines[-1][:160] if lines else ""
 
     @staticmethod
     def _what(code: str) -> str:
@@ -434,13 +442,29 @@ class ProvenanceGovernor:
         first = next((ln.strip() for ln in (code or "").splitlines() if ln.strip()), "")
         return first[:70] + ("..." if len(first) > 70 else "")
 
+    @staticmethod
+    def _merge(entries: list[tuple[int, str]]) -> list[str]:
+        """Outline lines, merging runs of consecutive steps that read the same."""
+        lines: list[str] = []
+        i = 0
+        while i < len(entries):
+            j = i
+            while j + 1 < len(entries) and entries[j + 1][1] == entries[i][1] and entries[j + 1][0] == entries[j][0] + 1:
+                j += 1
+            first, text = entries[i]
+            last = entries[j][0]
+            lines.append(f"[{first}] {text}" if j == i else f"[{first}-{last}] {text} ({j - i + 1} times)")
+            i = j + 1
+        return lines
+
     def compress(self, turns: Sequence[tuple[str, str]], metas: Sequence[TurnMeta], ledger: ProvenanceLedger
                  ) -> tuple[list[tuple[str, str]], float, bool, str]:
-        """Recent turns, recoverability, whether anything was cut, and the summary of the older turns."""
+        """Recent turns, recoverability, whether anything was cut, and the outline of the older turns."""
         if not turns:
             return [], 1.0, False, ""
         first_recent = max(0, len(turns) - self.keep_last)
-        lines: list[str] = []
+        entries: list[tuple[int, str]] = []
+        counts = {"held": 0, "errors": 0, "short": 0, "cut": 0, "kept": 0}
         total = available = 0
         lossy = False
         for (code, output), meta in zip(turns[:first_recent], metas[:first_recent]):
@@ -449,31 +473,34 @@ class ProvenanceGovernor:
             total += int(nontrivial)
             if meta.error:
                 result = self._error_message(text)
-                self.stats["condensed_errors"] += 1
+                counts["errors"] += 1
                 available += int(nontrivial)
             elif not nontrivial:   # short: shown in full (a pointer would not be shorter)
                 bound = [n for n, b in ledger.bindings.items() if b.step == meta.step]
                 result = " ".join(text.split()) or "ok"
                 if bound and (not text or text.startswith("Execution successful")):
                     result = "bound " + ", ".join(bound[:6])
+                counts["short"] += 1
             elif ledger.still_held(meta):
                 result = f"output held in {', '.join(meta.holders)}"
-                self.stats["pruned_held"] += 1
+                counts["held"] += 1
                 available += 1
             elif len(text) <= self._chars:
                 result = text
+                counts["kept"] += 1
                 available += 1
             else:
                 result = (text[: self._chars] + f" ... [+{len(text) - self._chars} chars; no variable holds this "
                           "output: repeat the call and assign the result if you need it]")
-                self.stats["cut_unheld"] += 1
+                counts["cut"] += 1
                 lossy = True
-            lines.append(f"[{meta.step + 1}] {self._what(code)} -> {result}")
+            entries.append((meta.step + 1, f"{self._what(code)} -> {result}"))
         recent = list(turns[first_recent:])
         for _, output in recent:
             nontrivial = len((output or "").strip()) > self.inline_chars
             total += int(nontrivial)
             available += int(nontrivial)
+        lines = self._merge(entries)
         summary = ("Earlier steps (code collapsed; each output is shown, pointed to the variable that holds it, or "
                    "shortened):\n" + "\n".join(lines)) if lines else ""
         used = (self.tokens(summary) if summary else 0) + self.tokens(ledger.render()) + \
@@ -481,7 +508,7 @@ class ProvenanceGovernor:
         setpoint = self.budget_tokens
         if self.match_window:
             window = sum(self.tokens(c) + self.tokens(o[:6000]) for c, o in turns[-self.window_turns:])
-            setpoint = max(1, min(setpoint, window))
+            setpoint = max(1, min(setpoint, int(self.window_ratio * window)))
         err = (setpoint - used) / setpoint   # under the setpoint: keep more of the shortened outputs
         derivative = err - self._last_err
         self._last_err = err
@@ -489,6 +516,7 @@ class ProvenanceGovernor:
         factor = 1 + self.kp * err + self.ki * 0.1 * self._integral + self.kd * derivative
         self._chars = int(max(self.min_chars, min(self.max_chars, self._chars * max(0.5, factor))))
         phi = available / total if total else 1.0
+        self.stats.update(counts)
         self.stats["steps"] += 1
         self.log.append({"recoverability": phi, "tokens": float(used), "setpoint": float(setpoint),
                          "chars": float(self._chars)})
