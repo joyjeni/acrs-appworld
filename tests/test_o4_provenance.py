@@ -195,7 +195,7 @@ def test_old_turns_collapse_into_a_summary_that_points_to_variables():
     assert "[2] venmo.show_contacts -> output held in contacts" in summary
     assert "[1] supervisor.show_profile, supervisor.show_account_passwords, venmo.login -> " in summary
     assert "@x.com" not in summary                               # the 1,700-character listing is not repeated
-    assert phi == 1.0 and not lossy and g.stats["pruned_held"] == 1
+    assert phi == 1.0 and not lossy and g.stats["held"] == 1
     # Once the variable is rebound the value is no longer held: the output is shortened instead, which is a loss.
     code, out, meta = _step(w, ledger, 5, "contacts = None")
     recent, phi, lossy, summary = g.compress(turns + [(code, out)], metas + [meta], ledger)
@@ -220,10 +220,20 @@ def test_old_errors_and_short_outputs_stay_in_the_summary():
     assert "[2] n = 31 -> 31" in summary
 
 
+def test_repeated_steps_are_merged_in_the_outline():
+    w = ExecWorld()
+    ledger = ProvenanceLedger(InterpreterState(w))
+    bad = "apis.venmo.no_such_api()"
+    _, (_, _, _, summary), _ = _governor_after(w, ledger, [LOGIN, bad, bad, bad, "a = 1", "b = 2", "c = 3"])
+    assert "[2-4] venmo.no_such_api -> KeyError: \"No API named 'no_such_api' found in the venmo app.\" (3 times)" \
+        in summary
+
+
 def test_pid_controller_tracks_the_token_setpoint():
     w = ExecWorld()
     ledger = ProvenanceLedger(InterpreterState(w))
-    codes = [LOGIN] + ["print(apis.venmo.show_contacts(access_token=token))"] * 6 + ["a = 1", "b = 2", "c = 3"]
+    codes = [LOGIN] + [f"print({i}, apis.venmo.show_contacts(access_token=token))" for i in range(6)] + \
+        ["a = 1", "b = 2", "c = 3"]
     turns, metas = _run_steps(w, ledger, codes)
     tight = ProvenanceGovernor(budget_tokens=300, match_window=False)
     loose = ProvenanceGovernor(budget_tokens=200_000, match_window=False)
@@ -234,12 +244,12 @@ def test_pid_controller_tracks_the_token_setpoint():
         sizes.append(tight.log[-1]["tokens"])
     assert tight._chars == tight.min_chars and loose._chars == loose.max_chars
     assert sizes[-1] < sizes[0]                          # over the setpoint the history shrinks step by step
-    matched = ProvenanceGovernor(budget_tokens=200_000)  # default: the setpoint is the baseline window's size
+    matched = ProvenanceGovernor(budget_tokens=200_000)  # default: 0.9 x the size of the baseline's window
     for _ in range(10):
         matched.compress(turns, metas, ledger)
-    window = sum(len(c) // 4 + len(o[:6000]) // 4 for c, o in turns[-6:])
-    assert matched.log[-1]["setpoint"] == window
-    assert abs(matched.log[-1]["tokens"] - window) / window < 0.1   # tracks the window's size
+    window = sum(max(1, len(c) // 4) + max(1, len(o[:6000]) // 4) for c, o in turns[-6:])
+    assert matched.log[-1]["setpoint"] == int(0.9 * window)
+    assert abs(matched.log[-1]["tokens"] - 0.9 * window) / window < 0.1   # tracks it
 
 
 # ------------------------------------------------------------------ links to O1, O2, O3, G1
@@ -305,7 +315,7 @@ def test_full_agent_with_provenance_on_a_real_namespace():
     assert log.login_calls == 1 and log.prov_denials == 0 and log.refetch_calls == 0
     assert "Variables in your Python session" in cli.prompts[2][-1]["content"]
     assert "contacts: list of 31 dicts" in cli.prompts[2][-1]["content"]
-    assert log.history_tokens > 0 and "pruned_held" in log.o4
+    assert log.history_tokens > 0 and "held" in log.o4
 
 
 def test_agent_blocks_a_guessed_email_then_succeeds():
