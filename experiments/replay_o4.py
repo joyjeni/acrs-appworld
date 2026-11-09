@@ -47,7 +47,7 @@ def replay_task(task_dir: Path, experiment: str) -> dict:
 
     tid = task_dir.name
     io = AppWorld.parse_environment_io_log(file_path=str(task_dir / "logs" / "environment_io.md"))
-    window, fidelity, provenance, phis = [], [], [], []
+    window, fidelity, provenance, phis, window_phis = [], [], [], [], []
     same = 0
     with AppWorld(task_id=tid, experiment_name=experiment) as world:
         state = InterpreterState(world)
@@ -67,11 +67,15 @@ def replay_task(task_dir: Path, experiment: str) -> dict:
             history, phi, _, summary = governor.compress(turns, metas, ledger)
             provenance.append(size(history, ledger.render() + summary))
             phis.append(phi)
+            # The window shows the last six turns and nothing about what variables hold.
+            big = [len(o.strip()) > governor.inline_chars for _, o in turns]
+            window_phis.append(sum(big[-6:]) / sum(big) if any(big) else 1.0)
     return {
         "task_id": tid, "steps": len(io), "replayed_identically": same,
         "window": sum(window), "fidelity": sum(fidelity), "provenance": sum(provenance),
         "max_window": max(window, default=0), "max_provenance": max(provenance, default=0),
-        "recoverability": statistics.mean(phis) if phis else 1.0, "o4": dict(governor.stats),
+        "recoverability": statistics.mean(phis) if phis else 1.0,
+        "window_recoverability": statistics.mean(window_phis) if window_phis else 1.0, "o4": dict(governor.stats),
     }
 
 
@@ -100,9 +104,10 @@ def main() -> None:
     if ok:
         summary["provenanceVsWindow"] = 1 - summary["provenanceTokensPerStep"] / max(1e-9, summary["windowTokensPerStep"])
         summary["meanRecoverability"] = statistics.mean(r["recoverability"] for r in ok)
+        summary["meanWindowRecoverability"] = statistics.mean(r["window_recoverability"] for r in ok)
         summary["maxWindowTokens"] = max(r["max_window"] for r in ok)
         summary["maxProvenanceTokens"] = max(r["max_provenance"] for r in ok)
-        summary["o4"] = {k: sum(r["o4"].get(k, 0) for r in ok) for k in ("pruned_held", "condensed_errors", "cut_unheld")}
+        summary["o4"] = {k: sum(r["o4"].get(k, 0) for r in ok) for k in ("held", "errors", "short", "kept", "cut")}
         try:
             from scipy.stats import wilcoxon
             a, b = [r["provenance"] for r in ok], [r["window"] for r in ok]

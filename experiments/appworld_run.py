@@ -233,7 +233,8 @@ def main() -> None:
         "promptTokens": sum(e["usage"]["prompt_tokens"] for e in ok),
         # O4 (provenance pruning) and what it feeds: history size, pruning, repeated reads, logins, G1 R-AW-PROV.
         "meanHistoryTokens": sum(e.get("history_tokens", 0.0) for e in ok) / max(1, len(ok)),
-        "o4": {k: sum(e.get("o4", {}).get(k, 0) for e in ok) for k in ("pruned_held", "condensed_errors", "cut_unheld")},
+        # old turns by how O4's last outline showed them (pointer to a variable, error, short, kept, cut)
+        "o4": {k: sum(e.get("o4", {}).get(k, 0) for e in ok) for k in ("held", "errors", "short", "kept", "cut")},
         "refetchCalls": sum(e.get("refetch_calls", 0) for e in ok),
         "loginCalls": sum(e.get("login_calls", 0) for e in ok),
         "provDenials": sum(e.get("prov_denials", 0) for e in ok),
