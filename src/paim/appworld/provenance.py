@@ -432,6 +432,8 @@ class ProvenanceGovernor:
         if found:
             return found[-1][:160]
         lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
+        # O3's note after an error every candidate raised says only that nothing was committed: keep the error.
+        lines = [ln for ln in lines if not ln.startswith("[consensus]")] or lines
         return lines[-1][:160] if lines else ""
 
     @staticmethod
