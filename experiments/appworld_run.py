@@ -15,6 +15,9 @@ Rules followed: tune on train/dev only; test splits are run once per final confi
 Kaggle sessions stop at 12 hours: ACRS_DEADLINE (Unix seconds) stops workers between tasks, and --resume keeps
 the episode log and skips tasks already in it. Each train/dev episode records AppWorld's own per-task test result,
 so a resumed run can be scored even when an earlier session's app databases are gone.
+
+--few-shot K puts K worked examples from the train split in every config's prompt (paim.appworld.demos); the
+experiment name records K, so runs with and without examples never share an episode log.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ if os.environ.get("APPWORLD_ROOT"):
     os.chdir(os.environ["APPWORLD_ROOT"])
 
 from paim.appworld import ACRSAppWorldAgent, AgentConfig, ChatClient, ModelTier  # noqa: E402
+from paim.appworld.demos import data_dir, render_demos, select_demos  # noqa: E402
 from paim.common import clock  # noqa: E402  (imported before AppWorld freezes time)
 
 CONFIGS = {
@@ -54,6 +58,11 @@ def tier(spec: str, name: str) -> ModelTier:
     model, url = spec.split("@", 1)
     extra = {"chat_template_kwargs": {"enable_thinking": False}} if "qwen3" in model.lower() else {}
     return ModelTier(name=model, base_url=url, tier=name, extra_body=extra)
+
+
+def experiment_name(config: str, tag: str, seed: int, split: str, few_shot: int = 0) -> str:
+    """AppWorld experiment name; includes the number of worked examples when there are any."""
+    return f"acrs_{config}{('_' + tag) if tag else ''}{f'_fs{few_shot}' if few_shot else ''}_s{seed}_{split}"
 
 
 def deadline_reached() -> bool:
@@ -81,7 +90,7 @@ def task_result(world) -> dict:
 
 
 def worker(args_tuple):
-    task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path, context_limit, record = args_tuple
+    task_ids, cfg_name, exp, small_spec, large_spec, seed, out_path, context_limit, record, demos = args_tuple
     from appworld import AppWorld
 
     cfg = replace(CONFIGS[cfg_name], context_limit_tokens=context_limit)
@@ -97,7 +106,7 @@ def worker(args_tuple):
         try:
             with AppWorld(task_id=tid, experiment_name=exp, max_interactions=cfg.max_steps * (cfg.consensus_n + 1) + 10) as world:
                 try:
-                    log = ACRSAppWorldAgent(world, small, large, cfg, seed=seed).run()
+                    log = ACRSAppWorldAgent(world, small, large, cfg, seed=seed, demos=demos).run()
                     row = log.to_dict()
                 finally:
                     # Always persist the end state, so the official evaluator can score the episode.
@@ -126,6 +135,8 @@ def main() -> None:
     ap.add_argument("--context-limit", type=int, default=0,
                     help="prompt limit in tokens for every config (server max model length); 0 = off")
     ap.add_argument("--resume", action="store_true", help="keep the episode log and skip tasks already in it")
+    ap.add_argument("--few-shot", type=int, default=0,
+                    help="worked examples from the train split in every prompt (same for every config); 0 = none")
     args = ap.parse_args()
 
     from appworld import load_task_ids
@@ -133,7 +144,12 @@ def main() -> None:
     ids = load_task_ids(args.split)
     if args.limit:
         ids = ids[: args.limit]
-    exp = f"acrs_{args.config}{('_' + args.tag) if args.tag else ''}_s{args.seed}_{args.split}"
+    demos = select_demos(data_dir(), args.few_shot) if args.few_shot else []
+    if args.few_shot and len(demos) < args.few_shot:
+        sys.exit(f"--few-shot {args.few_shot}: only {len(demos)} usable train examples under {data_dir().resolve()} "
+                 "(see experiments/check_demos.py)")
+    demo_text = render_demos(demos)
+    exp = experiment_name(args.config, args.tag, args.seed, args.split, args.few_shot)
     out_dir = ROOT / "experiments/results/appworld"
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / f"{exp}.episodes.jsonl"
@@ -146,7 +162,7 @@ def main() -> None:
     t0 = clock.wall_time()
     with mp.get_context("spawn").Pool(args.workers) as pool:
         pool.map(worker, [(c, args.config, exp, args.small, args.large, args.seed, str(log_path), args.context_limit,
-                           record) for c in chunks if c])
+                           record, demo_text) for c in chunks if c])
     wall = clock.wall_time() - t0
     eps = [json.loads(l) for l in open(log_path)] if log_path.exists() else []
     attempted = [t for t in ids if t in {e["task_id"] for e in eps}]   # a deadline can leave tasks unattempted
@@ -191,6 +207,7 @@ def main() -> None:
         "experiment": exp, "split": args.split, "config": args.config, "tasks": len(ids),
         "tasksAttempted": len(attempted), "stoppedByDeadline": len(attempted) < len(ids),
         "contextLimit": args.context_limit, "windowDropped": sum(e.get("window_dropped", 0) for e in ok),
+        "fewShot": args.few_shot, "demoTasks": [d.task_id for d in demos],
         "official": report.get("aggregate", {}),
         "episodesFailed": len(eps) - len(ok),
         "missingOutputs": len(missing),
@@ -204,7 +221,8 @@ def main() -> None:
         "topStepErrors": Counter(re.sub(r"\d+", "#", m) for e in ok for m in e.get("error_samples", [])).most_common(10),
         "policyDenials": sum(e["policy_denials"] for e in ok),
         "consensus": {k: sum(e["consensus"].get(k, 0) for e in ok) for k in
-                      ("consensus_steps", "certified", "abstain_disagree", "abstain_all_failed", "candidate_executions")},
+                      ("consensus_steps", "certified", "abstain_disagree", "abstain_all_failed", "candidate_executions",
+                       "exempt_steps")},
         "router": {k: sum(e["router"].get(k, 0) for e in ok) for k in ("small", "large")},
         "tokens": sum(e["usage"]["prompt_tokens"] + e["usage"]["completion_tokens"] for e in ok),
         "meanFidelity": sum(e["fidelity_mean"] for e in ok) / max(1, len(ok)),
