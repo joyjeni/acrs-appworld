@@ -220,6 +220,21 @@ def test_old_errors_and_short_outputs_stay_in_the_summary():
     assert "[2] n = 31 -> 31" in summary
 
 
+def test_outline_of_a_step_o3_abstained_on_shows_the_error_not_the_note():
+    w = ExecWorld()
+    ledger = ProvenanceLedger(InterpreterState(w))
+    turns, metas = _run_steps(w, ledger, [LOGIN, "a = 1", "b = 2", "c = 3"])
+    err = ("Execution failed. Traceback:\n  File \"<cell>\", line 1\nException: Response status code is 404:\n"
+           "{'message': \"No API named 'find_user' found in the venmo app.\"}")
+    note = ("[consensus] This block raised the error above, and so did 2 sampled alternatives. Nothing was "
+            "committed: the world state is as it was before this step.")
+    turns.insert(1, ("apis.venmo.find_user(name='Ana')", f"{err}\n{note}"))
+    metas.insert(1, TurnMeta(step=1, kind="abstained", error=True))
+    summary = ProvenanceGovernor().compress(turns, metas, ledger)[3]
+    assert "[2] venmo.find_user -> {'message': \"No API named 'find_user' found in the venmo app.\"}" in summary
+    assert "[consensus]" not in summary
+
+
 def test_repeated_steps_are_merged_in_the_outline():
     w = ExecWorld()
     ledger = ProvenanceLedger(InterpreterState(w))
