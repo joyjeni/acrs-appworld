@@ -51,8 +51,10 @@ On a GPU, open [`experiments/ACRS_appworld.ipynb`](experiments/ACRS_appworld.ipy
 ## Running on Kaggle
 
 The notebook stops between tasks at `ACRS_HARD_STOP_H` (default 11 h), passes the server's context length to every
-config (`--context-limit`), and resumes a config's episode log within a session (`--resume`). Harness problems
-found on Kaggle and how they are handled: [`docs/KAGGLE_FINDINGS.md`](docs/KAGGLE_FINDINGS.md).
+config (`--context-limit`), and resumes a config's episode log within a session (`--resume`). Every config gets the
+same `FEW_SHOT` (default 3) worked examples from AppWorld's train split (`--few-shot`, `paim.appworld.demos`;
+check the selection with `experiments/check_demos.py`). Harness problems found on Kaggle and how they are handled:
+[`docs/KAGGLE_FINDINGS.md`](docs/KAGGLE_FINDINGS.md).
 
 ## Licence and data
 
