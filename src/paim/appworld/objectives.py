@@ -87,14 +87,17 @@ class SessionApiRetriever:
             s = c.score / top + self.app_weight * math.tanh(self._app_mem.get(spec.app, 0.0))
             scored.append((s, c.doc_id))
         scored.sort(reverse=True)
+        def logged_in(key: str) -> bool:   # an app whose token the session holds needs no login doc
+            return key.endswith(".login") and key.split(".")[0] in authenticated
+
         chosen: list[str] = []
         for key in self._committed[-4:]:
-            if key not in chosen:
+            if key not in chosen and not logged_in(key):
                 chosen.append(key)
         for _, d in scored:
             if len(chosen) >= self.k:
                 break
-            if d not in chosen:
+            if d not in chosen and not logged_in(d):
                 chosen.append(d)
         # auth completion (not for apps already logged in: their token is in a live variable)
         for app in {self.catalog[d].app for d in chosen} - set(authenticated):

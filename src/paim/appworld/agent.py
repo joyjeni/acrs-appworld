@@ -79,6 +79,7 @@ class AgentConfig:
     # HistoryGovernor), kept so the two designs can be compared.
     o4_mode: str = "provenance"
     o4_budget_tokens: int = 4000   # cap on the provenance governor's setpoint (it also tracks the baseline window)
+    trace: bool = False            # record each step's decisions in EpisodeLog.trace (analysis and the dashboard)
     # Hard prompt limit shared by every config (the server's max model length minus the reply). 0 = off.
     # Without it a long episode overflows the server's context and the whole episode fails on an HTTP 400,
     # which would count against whichever config keeps more history.
@@ -114,6 +115,7 @@ class EpisodeLog:
     refetch_calls: int = 0       # read calls repeated with the same call text in a later committed step
     login_calls: int = 0         # login calls in committed steps
     prov_denials: int = 0        # G1 R-AW-PROV denials (an id or email that was never observed)
+    trace: list[dict[str, Any]] = field(default_factory=list)   # per-step decisions when AgentConfig.trace
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -187,6 +189,7 @@ class ACRSAppWorldAgent:
         self._lossy = False
         self._history_tokens: list[int] = []
         self._reads_seen: set[str] = set()
+        self._step_view: dict[str, Any] = {}   # what O1 and O4 did for the current step (for the trace)
         self.log = EpisodeLog(task_id=str(getattr(self.task, "id", "")))
 
     def _supervisor_text(self) -> str:
@@ -221,6 +224,12 @@ class ACRSAppWorldAgent:
         if ledger_text:   # after the latest output: the current state of the session
             msgs[-1] = {"role": "user", "content": msgs[-1]["content"] + "\n\n" + ledger_text}
         self._history_tokens.append((sum(len(m["content"]) for m in msgs[2:]) + len(summary)) // 4)
+        self._step_view = {
+            "o1_docs": [sp.key for sp in specs], "o1_login_skipped": sorted(authenticated),
+            "o4_recoverability": round(fid, 3), "o4_lossy": self._lossy, "o4_history_tokens": self._history_tokens[-1],
+            "o4_outline_lines": sum(1 for ln in summary.splitlines() if ln.startswith("[")),
+            "o4_ledger_vars": len(self.state.names()) if self.ledger is not None else 0,
+        }
         return self._fit_limit(msgs)
 
     def _fit_limit(self, msgs: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -266,6 +275,17 @@ class ACRSAppWorldAgent:
                 self.log.refetch_calls += 1
             self._reads_seen.add(sig)
 
+    def _trace(self, step: int, ctx: tuple, arm: str, tokens_before: int, outcome: str, code: str, output: str,
+               g1: str, o3: str) -> None:
+        if not self.cfg.trace:
+            return
+        self.log.trace.append({
+            "step": step + 1, "arm": arm,
+            "risk": {"recent_error": ctx[0], "write_likely": ctx[1], "late": ctx[2], "lossy": ctx[3] if len(ctx) > 3 else False},
+            **self._step_view, "g1": g1, "o3": o3, "outcome": outcome, "error": is_error(output),
+            "tokens": self._total_tokens() - tokens_before, "code": code[:400], "output": str(output)[:400],
+        })
+
     def _add_turn(self, code: str, output: str, meta: TurnMeta) -> None:
         self.turns.append((code, output))
         self.metas.append(meta)
@@ -307,6 +327,7 @@ class ACRSAppWorldAgent:
                 self.log.stop_reason = "token ceiling"
                 break
             self.log.steps = step + 1   # every model turn counts, including blocked and abstained ones
+            tokens_before = self._total_tokens()
             msgs = self._messages()
             write_likely = any(s.writes for s in self.retriever.retrieve(self.task.instruction, "")[:3])
             ctx = TierRouter.context(last_error, write_likely, step, lossy=self._lossy)
@@ -316,16 +337,23 @@ class ACRSAppWorldAgent:
             code = show_last_expression(extract_code(text))
 
             # G1: policy before any execution
+            g1 = "off"
             if self.policy is not None:
                 ok, why = self.policy.check(code, self.ledger)
+                g1 = "allow" if ok else self.policy.decisions[-1].get("rule", "deny")
                 if not ok:
                     self._deny(step, code, why)
                     self.router.update(ctx, arm, False)
                     last_error = True
+                    self._trace(step, ctx, arm, tokens_before, "denied", code, why, g1, "-")
                     continue
 
             # O3: consensus on state-changing steps
-            if self.consensus.needed(code):
+            exempt_before = self.consensus.stats.get("exempt_steps", 0)
+            needed = self.consensus.needed(code)
+            o3 = "off" if not self.consensus.enabled else (
+                "exempt" if self.consensus.stats.get("exempt_steps", 0) > exempt_before else "not needed")
+            if needed:
                 def sample(k: int, msgs=msgs, client=client) -> list[str]:
                     if k <= 0:
                         return []
@@ -334,6 +362,8 @@ class ACRSAppWorldAgent:
                     return [show_last_expression(extract_code(o)) for o in outs]
 
                 res = self.consensus.run(self.world, code, sample, step, state=self.state)
+                o3 = f"certified {res.reason}" if res.certified else (
+                    "abstained: every candidate raised" if res.all_failed else "abstained: candidates disagree")
                 if res.certified and res.winner is not None:
                     if res.winner.code != code and self.policy is not None:
                         # G1 approved the greedy block; the block O3 commits must pass G1 too.
@@ -342,6 +372,8 @@ class ACRSAppWorldAgent:
                             self._deny(step, res.winner.code, why)
                             self.router.update(ctx, arm, False)
                             last_error = True
+                            g1 = self.policy.decisions[-1].get("rule", "deny")
+                            self._trace(step, ctx, arm, tokens_before, "denied", res.winner.code, why, g1, o3)
                             continue
                     code = res.winner.code
                     output = with_silence_hint(code, self.world.execute(code))
@@ -356,6 +388,7 @@ class ACRSAppWorldAgent:
                     self._add_turn(code, output, TurnMeta(step=step, kind="abstained", error=True))
                     self.router.update(ctx, arm, False)
                     last_error = True
+                    self._trace(step, ctx, arm, tokens_before, "abstained", code, output, g1, o3)
                     continue
             else:
                 output = with_silence_hint(code, self.world.execute(code))
@@ -369,6 +402,7 @@ class ACRSAppWorldAgent:
             meta = self.ledger.record(step, code, output, err) if self.ledger is not None else TurnMeta(step, error=err)
             self._add_turn(code, output, meta)
             last_error = err
+            self._trace(step, ctx, arm, tokens_before, "executed", code, output, g1, o3)
             if self.world.task_completed():
                 self.log.completed = True
                 self.log.stop_reason = "completed"
